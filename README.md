@@ -100,6 +100,17 @@ vercel --prod
 
 ## 4. Après le déploiement
 
+- **Installer l'icône sur son téléphone/ordinateur** : ouvrez le lien, puis :
+  - **Android (Chrome)** : menu ⋮ en haut à droite > "Installer l'application" (ou un
+    bandeau propose directement "Ajouter à l'écran d'accueil").
+  - **iPhone (Safari)** : bouton Partager (carré avec flèche) > "Sur l'écran d'accueil".
+  - **Ordinateur (Chrome/Edge)** : une icône d'installation ⊕ apparaît dans la barre
+    d'adresse à droite ; sinon menu ⋮ > "Installer SMI SARL".
+
+  Une fois installée, l'application s'ouvre comme une app normale (icône dédiée, sans
+  barre d'adresse de navigateur) — mais c'est toujours le même site, avec les mêmes
+  données partagées.
+
 - **Premier accès** : ouvrez le lien, choisissez "Administrateur", entrez votre nom et créez
   votre code PIN (4 chiffres minimum).
 - **Créer les stations** : depuis l'onglet Stations, ajoutez chaque station du réseau, avec

@@ -183,10 +183,11 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
   const caissePrecedente = num(c.caissePrecedente);
   const totalBon = num(c.totalBon);
   const totalVersement = num(c.totalVersement);
-  const caisseAttendue = caissePrecedente + ca - totalBon - totalVersement;
+  const totalPaiementMarchand = num(c.totalPaiementMarchand);
+  const caisseAttendue = caissePrecedente + ca - totalBon - totalVersement - totalPaiementMarchand;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
-  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, caisseAttendue, caisseDuJour, ecart };
+  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart };
 }
 
 /* --------------------------- Persistence hook -------------------------- */
@@ -1081,19 +1082,21 @@ function CaisseView({ db, setDb, profile }) {
   const [duJour, setDuJour] = useState("");
   const [bon, setBon] = useState("");
   const [versement, setVersement] = useState("");
+  const [paiementMarchand, setPaiementMarchand] = useState("");
 
   useEffect(() => {
     if (c.record) {
       setPrecedente(c.record.caissePrecedente ?? ""); setDuJour(c.record.caisseDuJour ?? "");
       setBon(c.record.totalBon ?? ""); setVersement(c.record.totalVersement ?? "");
+      setPaiementMarchand(c.record.totalPaiementMarchand ?? "");
     } else {
       setPrecedente(prevComputed ? String(prevComputed.caisseAttendue) : "");
-      setDuJour(""); setBon(""); setVersement("");
+      setDuJour(""); setBon(""); setVersement(""); setPaiementMarchand("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
 
-  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalBon: bon, totalVersement: versement }], stationId, date);
+  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalBon: bon, totalVersement: versement, totalPaiementMarchand: paiementMarchand }], stationId, date);
   const [err, setErr] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
@@ -1103,7 +1106,7 @@ function CaisseView({ db, setDb, profile }) {
     const effStationId = isGerant ? profile.stationId : stationId;
     if (!effStationId) return;
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    const row = { id: c.record?.id || uid(), stationId: effStationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalBon: bon, totalVersement: versement };
+    const row = { id: c.record?.id || uid(), stationId: effStationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalBon: bon, totalVersement: versement, totalPaiementMarchand: paiementMarchand };
     let next = { ...db, caisses: c.record ? db.caisses.map((x) => (x.id === c.record.id ? row : x)) : [...db.caisses, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "caisse", action: c.record ? "modification" : "création", before: c.record ? { caisseDuJour: c.record.caisseDuJour } : null, after: { date, caisseDuJour: duJour } });
     setDb(next);
@@ -1127,6 +1130,7 @@ function CaisseView({ db, setDb, profile }) {
           <Field label={`Caisse du jour — comptage (${devise})`}><NumberInput value={duJour} onChange={(e) => setDuJour(e.target.value)} /></Field>
           <Field label={`Total Bon (${devise})`}><NumberInput value={bon} onChange={(e) => setBon(e.target.value)} /></Field>
           <Field label={`Total Versement (${devise})`}><NumberInput value={versement} onChange={(e) => setVersement(e.target.value)} /></Field>
+          <Field label={`Paiement marchand (${devise})`} hint="Mobile money, carte, tout paiement non encaissé en espèces"><NumberInput value={paiementMarchand} onChange={(e) => setPaiementMarchand(e.target.value)} /></Field>
         </div>
 
         <div className="grid sm:grid-cols-3 gap-3 mt-4">
