@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Fuel, Gauge, Warehouse, Wallet, LayoutDashboard, CalendarRange,
   Building2, Settings2, LogOut, Plus, Trash2, Pencil, AlertTriangle,
-  CheckCircle2, X, Loader2, ChevronRight, MapPin, Droplet, Lock, Download, History
+  CheckCircle2, X, Loader2, ChevronRight, MapPin, Droplet, Lock, Download, History,
+  ClipboardCheck, Printer, ChevronDown
 } from "lucide-react";
 import { storage, isStorageDegraded, hasLocalStorage } from "./storage.js";
 
@@ -44,6 +45,15 @@ const FONTS = `
 .smi-input:focus, .smi-select:focus, .smi-btn:focus-visible { outline: 2px solid ${C.amber}; outline-offset: 2px; }
 @keyframes smiPulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 .smi-live { animation: smiPulse 2.2s ease-in-out infinite; }
+.smi-print-only { display: none; }
+@media print {
+  body * { visibility: hidden; }
+  .smi-print-area, .smi-print-area * { visibility: visible; }
+  .smi-print-area { position: absolute; top: 0; left: 0; width: 100%; }
+  .smi-no-print { display: none !important; }
+  .smi-print-only { display: block !important; }
+  .smi-print-area, .smi-print-area * { background: #fff !important; color: #111 !important; border-color: #ccc !important; box-shadow: none !important; }
+}
 `;
 
 function StyleInjector() {
@@ -51,28 +61,31 @@ function StyleInjector() {
 }
 
 /* ---------------------------- Logo (mark) -------------------------------
-   Cadran de compteur de pompe : anneau gradué + goutte bicolore
-   (ambre = essence, sarcelle = gasoil), écho direct du langage visuel
-   utilisé dans toute l'application pour ces deux carburants. */
-const LOGO_TICKS = [
-  { x1: 194, y1: 100, x2: 186, y2: 100 }, { x1: 181.4, y1: 147, x2: 174.5, y2: 143 },
-  { x1: 147, y1: 181.4, x2: 143, y2: 174.5 }, { x1: 100, y1: 194, x2: 100, y2: 186 },
-  { x1: 53, y1: 181.4, x2: 57, y2: 174.5 }, { x1: 18.6, y1: 147, x2: 25.5, y2: 143 },
-  { x1: 6, y1: 100, x2: 14, y2: 100 }, { x1: 18.6, y1: 53, x2: 25.5, y2: 57 },
-  { x1: 53, y1: 18.6, x2: 57, y2: 25.5 }, { x1: 100, y1: 6, x2: 100, y2: 14 },
-  { x1: 147, y1: 18.6, x2: 143, y2: 25.5 }, { x1: 181.4, y1: 53, x2: 174.5, y2: 57 },
-];
-
+   Main tendue orange sur cercle bleu — identité SMI SARL. */
 function Logo({ size = 28 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <circle cx="100" cy="100" r="94" stroke={C.amberDim} strokeWidth="2" />
-      {LOGO_TICKS.map((t, i) => (
-        <line key={i} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} stroke={C.amberDim} strokeWidth="3" strokeLinecap="round" />
-      ))}
-      <path d="M100,38 C72,80 48,112 48,136 C48,162 71,182 100,182 Z" fill={C.amber} />
-      <path d="M100,38 C128,80 152,112 152,136 C152,162 129,182 100,182 Z" fill={C.teal} />
-      <line x1="100" y1="38" x2="100" y2="182" stroke={C.bg} strokeWidth="2.5" />
+      <defs>
+        <linearGradient id="smiLogoBlue" x1="0" y1="0" x2="200" y2="200" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#2D6FE0" />
+          <stop offset="100%" stopColor="#123A82" />
+        </linearGradient>
+        <linearGradient id="smiLogoOrange" x1="60" y1="40" x2="140" y2="170" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFA24D" />
+          <stop offset="100%" stopColor="#E8791F" />
+        </linearGradient>
+      </defs>
+      <circle cx="100" cy="100" r="96" fill="url(#smiLogoBlue)" />
+      <circle cx="100" cy="100" r="94" stroke="#0E2A63" strokeWidth="2" />
+      {/* Main tendue : paume + doigts, silhouette simplifiée pour rester lisible en petite taille */}
+      <g fill="url(#smiLogoOrange)">
+        <rect x="78" y="86" width="44" height="66" rx="18" />
+        <rect x="60" y="70" width="15" height="52" rx="7.5" transform="rotate(-14 67.5 96)" />
+        <rect x="79" y="52" width="15" height="60" rx="7.5" />
+        <rect x="100" y="50" width="15" height="62" rx="7.5" />
+        <rect x="121" y="58" width="15" height="56" rx="7.5" transform="rotate(10 128.5 86)" />
+        <rect x="139" y="80" width="14" height="42" rx="7" transform="rotate(24 146 101)" />
+      </g>
     </svg>
   );
 }
@@ -194,8 +207,21 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections"];
+
+// Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
+// Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
+const INSPECTION_CHECKLIST = [
+  { id: "proprete", label: "Propreté générale du site" },
+  { id: "securite_incendie", label: "Extincteurs présents et à jour" },
+  { id: "signaletique", label: "Affichage des prix conforme et lisible" },
+  { id: "pompes_etat", label: "État général des pompes" },
+  { id: "sanitaires", label: "Hygiène des sanitaires" },
+  { id: "epi_personnel", label: "Tenue et équipement du personnel" },
+  { id: "registre_maintenance", label: "Registre de maintenance à jour" },
+  { id: "eclairage", label: "Éclairage fonctionnel" },
+];
 const AUDIT_MAX = 500; // le journal garde les 500 dernières actions pour rester léger
 
 // Fusionne trois versions d'une base (distant / base locale de départ / locale modifiée)
@@ -1157,6 +1183,162 @@ function CaisseView({ db, setDb, profile }) {
   );
 }
 
+/* ------------------------------ Inspection view ----------------------------- */
+
+function InspectionView({ db, setDb, profile }) {
+  const isGerant = profile.role === "gerant";
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
+  const [date, setDate] = useState(todayISO());
+  const [items, setItems] = useState(() => Object.fromEntries(INSPECTION_CHECKLIST.map((c) => [c.id, { status: "conforme", note: "" }])));
+  const [observations, setObservations] = useState("");
+  const [err, setErr] = useState("");
+  const [expandedId, setExpandedId] = useState(null);
+
+  const setItemStatus = (id, status) => setItems((prev) => ({ ...prev, [id]: { ...prev[id], status } }));
+  const setItemNote = (id, note) => setItems((prev) => ({ ...prev, [id]: { ...prev[id], note } }));
+
+  const resetForm = () => {
+    setItems(Object.fromEntries(INSPECTION_CHECKLIST.map((c) => [c.id, { status: "conforme", note: "" }])));
+    setObservations("");
+  };
+
+  const save = () => {
+    setErr("");
+    const effStationId = isGerant ? profile.stationId : stationId;
+    if (!effStationId) return;
+    if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const row = {
+      id: uid(), stationId: effStationId, date,
+      inspecteur: profile?.name || "—",
+      items: INSPECTION_CHECKLIST.map((c) => ({ id: c.id, label: c.label, status: items[c.id]?.status || "conforme", note: items[c.id]?.note || "" })),
+      observations,
+    };
+    const nonConformites = row.items.filter((i) => i.status === "non_conforme").length;
+    let next = { ...db, inspections: [...db.inspections, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "inspection", action: "création", after: { date, nonConformites } });
+    setDb(next);
+    resetForm();
+  };
+
+  const removeInspection = (insp) => {
+    if (!confirm("Supprimer cette inspection ?")) return;
+    let next = { ...db, inspections: db.inspections.filter((x) => x.id !== insp.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: insp.stationId, entity: "inspection", action: "suppression", before: { date: insp.date } });
+    setDb(next);
+  };
+
+  const history = db.inspections
+    .filter((i) => (isGerant ? i.stationId === profile.stationId : (!stationId || i.stationId === stationId)))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  const statusMeta = {
+    conforme: { label: "Conforme", tone: "success" },
+    non_conforme: { label: "Non conforme", tone: "danger" },
+    na: { label: "N/A", tone: "muted" },
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Inspection</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Grille de contrôle standard pour visite de station — conservée avec date, inspecteur et remarques.</p>
+      </div>
+
+      <Card>
+        <div className="grid sm:grid-cols-2 gap-3 mb-4">
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
+          <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          {INSPECTION_CHECKLIST.map((c) => (
+            <div key={c.id} className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <p className="text-sm font-medium">{c.label}</p>
+                <div className="flex gap-1.5">
+                  {["conforme", "non_conforme", "na"].map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setItemStatus(c.id, s)}
+                      className="smi-btn rounded-md px-2.5 py-1 text-xs font-medium"
+                      style={{
+                        background: items[c.id]?.status === s ? (s === "non_conforme" ? C.dangerSoft : s === "conforme" ? "#1E3A24" : C.panel) : "transparent",
+                        color: items[c.id]?.status === s ? (s === "non_conforme" ? C.danger : s === "conforme" ? C.success : C.textMuted) : C.textFaint,
+                        border: `1px solid ${items[c.id]?.status === s ? (s === "non_conforme" ? C.danger : s === "conforme" ? C.success : C.border) : C.border}`,
+                      }}
+                    >
+                      {statusMeta[s].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {items[c.id]?.status === "non_conforme" && (
+                <input
+                  className="smi-input w-full rounded-md px-3 py-1.5 text-xs mt-2"
+                  placeholder="Remarque (optionnel)"
+                  value={items[c.id]?.note || ""}
+                  onChange={(e) => setItemNote(c.id, e.target.value)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3">
+          <Field label="Observations générales (optionnel)">
+            <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" rows={3} value={observations} onChange={(e) => setObservations(e.target.value)} />
+          </Field>
+        </div>
+
+        <div className="flex items-center justify-end gap-3 mt-4">
+          {err && <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+          <Button onClick={save} disabled={!stationId && !isGerant}><CheckCircle2 size={16} /> Enregistrer l'inspection</Button>
+        </div>
+      </Card>
+
+      <Card>
+        <p className="font-semibold text-sm mb-3">Historique des inspections</p>
+        {history.length === 0 ? (
+          <EmptyState icon={ClipboardCheck} title="Aucune inspection enregistrée" hint="Les inspections réalisées apparaîtront ici." />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {history.map((insp) => {
+              const nc = insp.items.filter((i) => i.status === "non_conforme").length;
+              const open = expandedId === insp.id;
+              return (
+                <div key={insp.id} className="rounded-md" style={{ border: `1px solid ${C.border}` }}>
+                  <button onClick={() => setExpandedId(open ? null : insp.id)} className="smi-btn w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{fmtDateLong(insp.date)}</span>
+                      <span className="text-xs" style={{ color: C.textFaint }}>{db.stations.find((s) => s.id === insp.stationId)?.nom || "—"} · {insp.inspecteur}</span>
+                      <Pill tone={nc > 0 ? "danger" : "success"}>{nc > 0 ? `${nc} non-conformité(s)` : "Tout conforme"}</Pill>
+                    </div>
+                    <ChevronDown size={16} style={{ transform: open ? "rotate(180deg)" : "none", color: C.textFaint }} />
+                  </button>
+                  {open && (
+                    <div className="px-3 pb-3 flex flex-col gap-1.5" style={{ borderTop: `1px solid ${C.border}` }}>
+                      {insp.items.map((i) => (
+                        <div key={i.id} className="flex items-center justify-between gap-2 text-xs pt-1.5">
+                          <span style={{ color: C.textMuted }}>{i.label}{i.note ? ` — ${i.note}` : ""}</span>
+                          <Pill tone={statusMeta[i.status]?.tone || "muted"}>{statusMeta[i.status]?.label || i.status}</Pill>
+                        </div>
+                      ))}
+                      {insp.observations && <p className="text-xs pt-2" style={{ color: C.textFaint }}>Observations : {insp.observations}</p>}
+                      {!isGerant && (
+                        <div className="pt-2"><Button variant="danger" onClick={() => removeInspection(insp)}><Trash2 size={13} /> Supprimer</Button></div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 /* ------------------------------- Dashboard view ----------------------------- */
 
 function DashboardView({ db }) {
@@ -1387,9 +1569,110 @@ function RapportMensuelView({ db }) {
   );
 }
 
+/* ------------------------------ Rapport journalier ---------------------------- */
+
+function RapportJournalierView({ db }) {
+  const [date, setDate] = useState(todayISO());
+
+  const rows = useMemo(() => db.stations.map((s) => {
+    const v = computeVente(db.releves, db.ventes, s.id, date);
+    const stockRec = db.stocks.find((x) => x.stationId === s.id && x.date === date);
+    const stock = stockRec ? computeStock(db.releves, db.stocks, s.id, date) : null;
+    const caisseRec = db.caisses.find((x) => x.stationId === s.id && x.date === date);
+    const caisse = caisseRec ? computeCaisse(db.releves, db.ventes, db.caisses, s.id, date) : null;
+    const inspections = db.inspections.filter((i) => i.stationId === s.id && i.date === date);
+    return { station: s, v, stock, caisse, inspections };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.inspections, date]);
+
+  const grandTotal = rows.reduce((a, r) => ({ vEssence: a.vEssence + r.v.essence, vGasoil: a.vGasoil + r.v.gasoil, ca: a.ca + r.v.ca }), { vEssence: 0, vGasoil: 0, ca: 0 });
+  const devises = new Set(db.stations.map((s) => s.devise || "GNF"));
+  const grandTotalCaDisplay = devises.size <= 1 ? fmtMontant(grandTotal.ca, [...devises][0] || "GNF") : `${grandTotal.ca.toLocaleString("fr-FR")} (multi-devises)`;
+
+  const exportPdf = () => window.print();
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
+        <div>
+          <h2 className="smi-display text-2xl">Rapport journalier</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Synthèse d'une journée, toutes stations confondues — exportable en PDF.</p>
+        </div>
+        <Button variant="ghost" onClick={exportPdf}><Printer size={16} /> Exporter en PDF</Button>
+      </div>
+
+      <Card className="smi-no-print">
+        <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+      </Card>
+
+      <div className="smi-print-area">
+        <div className="hidden smi-print-only mb-4">
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport journalier</h1>
+          <p style={{ fontSize: 13, color: "#444" }}>{fmtDateLong(date)}</p>
+        </div>
+
+        <Card>
+          <p className="font-semibold text-sm mb-3">Synthèse — {fmtDateLong(date)}</p>
+          <div className="overflow-x-auto smi-scroll">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Station</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Essence</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Gasoil</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>CA</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart stock</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart caisse</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Inspection</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const devise = r.station.devise || "GNF";
+                  const ecartStock = r.stock ? (r.stock.ecartEssence ?? 0) + (r.stock.ecartGasoil ?? 0) : null;
+                  return (
+                    <tr key={r.station.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1.5 font-semibold">{r.station.nom}</td>
+                      <td className="py-1.5 text-right smi-mono">{fmtVol(r.v.essence)}</td>
+                      <td className="py-1.5 text-right smi-mono">{fmtVol(r.v.gasoil)}</td>
+                      <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: C.amber }}>{fmtMontant(r.v.ca, devise)}</td>
+                      <td className="py-1.5 text-right smi-mono">{r.stock ? fmtVol(ecartStock) : "—"}</td>
+                      <td className="py-1.5 text-right smi-mono">{r.caisse && r.caisse.ecart !== null ? fmtMontant(r.caisse.ecart, devise) : "—"}</td>
+                      <td className="py-1.5 text-right">
+                        {r.inspections.length === 0 ? "—" : (
+                          <Pill tone={r.inspections.some((i) => i.items.some((x) => x.status === "non_conforme")) ? "danger" : "success"}>
+                            {r.inspections.length} fait(s)
+                          </Pill>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <tr><td colSpan={7} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune station enregistrée.</td></tr>
+                )}
+              </tbody>
+              {rows.length > 0 && (
+                <tfoot>
+                  <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                    <td className="py-2 font-bold">Total</td>
+                    <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vEssence)}</td>
+                    <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vGasoil)}</td>
+                    <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{grandTotalCaDisplay}</td>
+                    <td colSpan={3}></td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
@@ -1451,7 +1734,9 @@ const TABS = [
   { key: "ventes", label: "Ventes", icon: Wallet, adminOnly: true },
   { key: "stock", label: "Contrôle Stock", icon: Warehouse, adminOnly: false },
   { key: "caisse", label: "Caisse", icon: Wallet, adminOnly: false },
+  { key: "inspection", label: "Inspection", icon: ClipboardCheck, adminOnly: false },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
+  { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: true },
   { key: "journal", label: "Journal des saisies", icon: History, adminOnly: true },
 ];
 
@@ -1489,7 +1774,9 @@ export default function App() {
       case "ventes": return <VentesView db={db} setDb={setDb} profile={profile} />;
       case "stock": return <StockView db={db} setDb={setDb} profile={profile} />;
       case "caisse": return <CaisseView db={db} setDb={setDb} profile={profile} />;
+      case "inspection": return <InspectionView db={db} setDb={setDb} profile={profile} />;
       case "rapport": return <RapportMensuelView db={db} />;
+      case "rapport_jour": return <RapportJournalierView db={db} />;
       case "journal": return <AuditLogView db={db} />;
       default: return null;
     }
