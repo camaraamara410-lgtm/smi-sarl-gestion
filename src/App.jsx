@@ -63,31 +63,9 @@ function StyleInjector() {
 /* ---------------------------- Logo (mark) -------------------------------
    Main tendue orange sur cercle bleu — identité SMI SARL. */
 function Logo({ size = 28 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <defs>
-        <linearGradient id="smiLogoBlue" x1="0" y1="0" x2="200" y2="200" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#2D6FE0" />
-          <stop offset="100%" stopColor="#123A82" />
-        </linearGradient>
-        <linearGradient id="smiLogoOrange" x1="60" y1="40" x2="140" y2="170" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFA24D" />
-          <stop offset="100%" stopColor="#E8791F" />
-        </linearGradient>
-      </defs>
-      <circle cx="100" cy="100" r="96" fill="url(#smiLogoBlue)" />
-      <circle cx="100" cy="100" r="94" stroke="#0E2A63" strokeWidth="2" />
-      {/* Main tendue : paume + doigts, silhouette simplifiée pour rester lisible en petite taille */}
-      <g fill="url(#smiLogoOrange)">
-        <rect x="78" y="86" width="44" height="66" rx="18" />
-        <rect x="60" y="70" width="15" height="52" rx="7.5" transform="rotate(-14 67.5 96)" />
-        <rect x="79" y="52" width="15" height="60" rx="7.5" />
-        <rect x="100" y="50" width="15" height="62" rx="7.5" />
-        <rect x="121" y="58" width="15" height="56" rx="7.5" transform="rotate(10 128.5 86)" />
-        <rect x="139" y="80" width="14" height="42" rx="7" transform="rotate(24 146 101)" />
-      </g>
-    </svg>
-  );
+  // Icône officielle de marque (fournie par l'utilisateur), utilisée à l'identique
+  // dans l'app, comme favicon et comme icône installable — cohérence totale.
+  return <img src="/icon-192.png" width={size} height={size} alt="" aria-hidden="true" style={{ borderRadius: size * 0.22, display: "block" }} />;
 }
 
 /* ---------------------------- Helpers -------------------------------- */
@@ -795,12 +773,26 @@ function RelevePompesView({ db, setDb, profile }) {
 
   const existing = db.releves.find((r) => r.stationId === stationId && r.pompeId === pompeId && r.date === date);
 
+  // Relevé le plus récent avant la date sélectionnée, pour la même pompe — sert à
+  // pré-remplir automatiquement l'ouverture du jour avec la clôture précédente.
+  const previousReleve = useMemo(() => {
+    const candidates = db.releves.filter((r) => r.pompeId === pompeId && r.stationId === stationId && r.date < date);
+    if (candidates.length === 0) return null;
+    return candidates.sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  }, [db.releves, pompeId, stationId, date]);
+
   useEffect(() => {
     if (existing) {
       setIdxOE(existing.indexOuvertureEssence ?? "");
       setIdxCE(existing.indexClotureEssence ?? "");
       setIdxOG(existing.indexOuvertureGasoil ?? "");
       setIdxCG(existing.indexClotureGasoil ?? "");
+    } else if (previousReleve) {
+      // Auto-report : l'ouverture du jour reprend la clôture du relevé précédent.
+      setIdxOE(previousReleve.indexClotureEssence ?? "");
+      setIdxCE("");
+      setIdxOG(previousReleve.indexClotureGasoil ?? "");
+      setIdxCG("");
     } else {
       setIdxOE(""); setIdxCE(""); setIdxOG(""); setIdxCG("");
     }
@@ -855,7 +847,7 @@ function RelevePompesView({ db, setDb, profile }) {
           <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
             <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.amber }}><Droplet size={13} /> Essence</p>
             <div className="grid grid-cols-2 gap-2">
-              <Field label="Index ouverture"><NumberInput value={idxOE} onChange={(e) => setIdxOE(e.target.value)} /></Field>
+              <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOE} onChange={(e) => setIdxOE(e.target.value)} /></Field>
               <Field label="Index clôture"><NumberInput value={idxCE} onChange={(e) => setIdxCE(e.target.value)} /></Field>
             </div>
             <div className="mt-2"><GaugeNumber value={fmtVol(ve)} tone="amber" /></div>
@@ -863,7 +855,7 @@ function RelevePompesView({ db, setDb, profile }) {
           <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
             <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.teal }}><Droplet size={13} /> Gasoil</p>
             <div className="grid grid-cols-2 gap-2">
-              <Field label="Index ouverture"><NumberInput value={idxOG} onChange={(e) => setIdxOG(e.target.value)} /></Field>
+              <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOG} onChange={(e) => setIdxOG(e.target.value)} /></Field>
               <Field label="Index clôture"><NumberInput value={idxCG} onChange={(e) => setIdxCG(e.target.value)} /></Field>
             </div>
             <div className="mt-2"><GaugeNumber value={fmtVol(vg)} tone="teal" /></div>
