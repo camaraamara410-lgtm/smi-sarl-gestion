@@ -168,17 +168,29 @@ function computeStock(releves, stocks, stationId, date) {
   return { record: s.id ? s : null, vol, stockOuvertureEssence, stockOuvertureGasoil, livraisonEssence, livraisonGasoil, stockClotureEssence, stockClotureGasoil, stockPhysiqueEssence, stockPhysiqueGasoil, ecartEssence, ecartGasoil };
 }
 
+function sumBons(bons) {
+  return (bons || []).reduce((a, b) => a + num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute), 0);
+}
+function sumVersements(versements) {
+  return (versements || []).reduce((a, v) => a + num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement), 0);
+}
+
 function computeCaisse(releves, ventes, caisses, stationId, date) {
   const c = findCaisse(caisses, stationId, date) || {};
   const ca = computeVente(releves, ventes, stationId, date).ca;
   const caissePrecedente = num(c.caissePrecedente);
-  const totalBon = num(c.totalBon);
-  const totalVersement = num(c.totalVersement);
+  // Rétro-compatibilité : les anciennes saisies avaient un total unique (totalBon/
+  // totalVersement) au lieu de lignes détaillées — on ne recalcule depuis les lignes
+  // que si elles existent, sinon on retombe sur l'ancien total simple.
+  const bons = c.bons || [];
+  const versements = c.versements || [];
+  const totalBon = c.bons ? sumBons(bons) : num(c.totalBon);
+  const totalVersement = c.versements ? sumVersements(versements) : num(c.totalVersement);
   const totalPaiementMarchand = num(c.totalPaiementMarchand);
   const caisseAttendue = caissePrecedente + ca - totalBon - totalVersement - totalPaiementMarchand;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
-  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart };
+  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
 }
 
 /* --------------------------- Persistence hook -------------------------- */
@@ -1098,23 +1110,32 @@ function CaisseView({ db, setDb, profile }) {
 
   const [precedente, setPrecedente] = useState("");
   const [duJour, setDuJour] = useState("");
-  const [bon, setBon] = useState("");
-  const [versement, setVersement] = useState("");
+  const [bons, setBons] = useState([]);
+  const [versements, setVersements] = useState([]);
   const [paiementMarchand, setPaiementMarchand] = useState("");
 
   useEffect(() => {
     if (c.record) {
       setPrecedente(c.record.caissePrecedente ?? ""); setDuJour(c.record.caisseDuJour ?? "");
-      setBon(c.record.totalBon ?? ""); setVersement(c.record.totalVersement ?? "");
+      setBons(c.record.bons || (c.record.totalBon ? [{ id: uid(), libelle: "Bon", quantite: "", prixUnitaire: "", fraisRoute: c.record.totalBon }] : []));
+      setVersements(c.record.versements || (c.record.totalVersement ? [{ id: uid(), libelle: "Versement", versementBancaire: c.record.totalVersement, codeMarchand: "", autreVersement: "" }] : []));
       setPaiementMarchand(c.record.totalPaiementMarchand ?? "");
     } else {
       setPrecedente(prevComputed ? String(prevComputed.caisseAttendue) : "");
-      setDuJour(""); setBon(""); setVersement(""); setPaiementMarchand("");
+      setDuJour(""); setBons([]); setVersements([]); setPaiementMarchand("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
 
-  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalBon: bon, totalVersement: versement, totalPaiementMarchand: paiementMarchand }], stationId, date);
+  const addBon = () => setBons((p) => [...p, { id: uid(), libelle: "", quantite: "", prixUnitaire: "", fraisRoute: "" }]);
+  const updateBon = (id, field, val) => setBons((p) => p.map((b) => (b.id === id ? { ...b, [field]: val } : b)));
+  const removeBon = (id) => setBons((p) => p.filter((b) => b.id !== id));
+
+  const addVersement = () => setVersements((p) => [...p, { id: uid(), libelle: "", versementBancaire: "", codeMarchand: "", autreVersement: "" }]);
+  const updateVersement = (id, field, val) => setVersements((p) => p.map((v) => (v.id === id ? { ...v, [field]: val } : v)));
+  const removeVersement = (id) => setVersements((p) => p.filter((v) => v.id !== id));
+
+  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, bons, versements, totalPaiementMarchand: paiementMarchand }], stationId, date);
   const [err, setErr] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
@@ -1124,7 +1145,7 @@ function CaisseView({ db, setDb, profile }) {
     const effStationId = isGerant ? profile.stationId : stationId;
     if (!effStationId) return;
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    const row = { id: c.record?.id || uid(), stationId: effStationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalBon: bon, totalVersement: versement, totalPaiementMarchand: paiementMarchand };
+    const row = { id: c.record?.id || uid(), stationId: effStationId, date, caissePrecedente: precedente, caisseDuJour: duJour, bons, versements, totalPaiementMarchand: paiementMarchand };
     let next = { ...db, caisses: c.record ? db.caisses.map((x) => (x.id === c.record.id ? row : x)) : [...db.caisses, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "caisse", action: c.record ? "modification" : "création", before: c.record ? { caisseDuJour: c.record.caisseDuJour } : null, after: { date, caisseDuJour: duJour } });
     setDb(next);
@@ -1146,12 +1167,66 @@ function CaisseView({ db, setDb, profile }) {
         <div className="grid sm:grid-cols-2 gap-3">
           <Field label={`Caisse précédente (${devise})`} hint="Pré-remplie depuis la veille"><NumberInput value={precedente} onChange={(e) => setPrecedente(e.target.value)} /></Field>
           <Field label={`Caisse du jour — comptage (${devise})`}><NumberInput value={duJour} onChange={(e) => setDuJour(e.target.value)} /></Field>
-          <Field label={`Total Bon (${devise})`}><NumberInput value={bon} onChange={(e) => setBon(e.target.value)} /></Field>
-          <Field label={`Total Versement (${devise})`}><NumberInput value={versement} onChange={(e) => setVersement(e.target.value)} /></Field>
           <Field label={`Paiement marchand (${devise})`} hint="Mobile money, carte, tout paiement non encaissé en espèces"><NumberInput value={paiementMarchand} onChange={(e) => setPaiementMarchand(e.target.value)} /></Field>
         </div>
 
-        <div className="grid sm:grid-cols-3 gap-3 mt-4">
+        {/* Coupon de Bon — lignes détaillées (libellé, quantité, prix unitaire, frais de route) */}
+        <div className="mt-5">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-semibold">Coupon de Bon</p>
+            <Button variant="ghost" onClick={addBon}><Plus size={14} /> Ajouter une ligne</Button>
+          </div>
+          {bons.length === 0 ? (
+            <p className="text-xs" style={{ color: C.textFaint }}>Aucune ligne de bon.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {bons.map((b) => {
+                const montant = num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute);
+                return (
+                  <div key={b.id} className="rounded-md p-2.5 grid gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, gridTemplateColumns: "1.4fr 0.8fr 0.9fr 0.9fr auto" }}>
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" placeholder="Libellé (ex : Citerne BI 7077)" value={b.libelle} onChange={(e) => updateBon(b.id, "libelle", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Quantité (L)" value={b.quantite} onChange={(e) => updateBon(b.id, "quantite", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder={`Prix unit. (${devise})`} value={b.prixUnitaire} onChange={(e) => updateBon(b.id, "prixUnitaire", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Frais de route" value={b.fraisRoute} onChange={(e) => updateBon(b.id, "fraisRoute", e.target.value)} />
+                    <button onClick={() => removeBon(b.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
+                    <p className="text-xs col-span-5 text-right" style={{ color: C.textFaint }}>Montant : <span className="smi-mono">{fmtMontant(montant, devise)}</span></p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <p className="text-xs text-right mt-1.5 font-semibold" style={{ color: C.textMuted }}>Total Bons : <span className="smi-mono">{fmtMontant(live.totalBon, devise)}</span></p>
+        </div>
+
+        {/* Coupon de Versement — lignes détaillées (versement bancaire / code marchand / autre) */}
+        <div className="mt-5">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-semibold">Coupon de Versement</p>
+            <Button variant="ghost" onClick={addVersement}><Plus size={14} /> Ajouter une ligne</Button>
+          </div>
+          {versements.length === 0 ? (
+            <p className="text-xs" style={{ color: C.textFaint }}>Aucune ligne de versement.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {versements.map((v) => {
+                const montant = num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement);
+                return (
+                  <div key={v.id} className="rounded-md p-2.5 grid gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, gridTemplateColumns: "1.2fr 0.9fr 0.9fr 0.9fr auto" }}>
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" placeholder="Libellé" value={v.libelle} onChange={(e) => updateVersement(v.id, "libelle", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Versement bancaire" value={v.versementBancaire} onChange={(e) => updateVersement(v.id, "versementBancaire", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Code marchand" value={v.codeMarchand} onChange={(e) => updateVersement(v.id, "codeMarchand", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Autre versement" value={v.autreVersement} onChange={(e) => updateVersement(v.id, "autreVersement", e.target.value)} />
+                    <button onClick={() => removeVersement(v.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
+                    <p className="text-xs col-span-5 text-right" style={{ color: C.textFaint }}>Montant : <span className="smi-mono">{fmtMontant(montant, devise)}</span></p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <p className="text-xs text-right mt-1.5 font-semibold" style={{ color: C.textMuted }}>Total Versements : <span className="smi-mono">{fmtMontant(live.totalVersement, devise)}</span></p>
+        </div>
+
+        <div className="grid sm:grid-cols-3 gap-3 mt-5">
           <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
             <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>CA du jour (auto)</p>
             <GaugeNumber value={fmtMontant(live.ca, devise)} />
@@ -1564,6 +1639,7 @@ function RapportMensuelView({ db }) {
 /* ------------------------------ Rapport journalier ---------------------------- */
 
 function RapportJournalierView({ db }) {
+  const [stationId, setStationId] = useState(db.stations[0]?.id || "");
   const [date, setDate] = useState(todayISO());
 
   const rows = useMemo(() => db.stations.map((s) => {
@@ -1582,82 +1658,371 @@ function RapportJournalierView({ db }) {
 
   const exportPdf = () => window.print();
 
+  const station = db.stations.find((s) => s.id === stationId);
+  const devise = station?.devise || "GNF";
+
+  // Détail par pompe pour la section "1. Index des pompes" — chaque pompe donne une ligne
+  // Essence et une ligne Gasoil (comme dans le modèle papier).
+  const pompeLines = useMemo(() => {
+    if (!stationId) return [];
+    const lines = [];
+    db.pompes.filter((p) => p.stationId === stationId).forEach((p) => {
+      const r = db.releves.find((x) => x.stationId === stationId && x.pompeId === p.id && x.date === date);
+      const oe = num(r?.indexOuvertureEssence), ce = num(r?.indexClotureEssence);
+      const og = num(r?.indexOuvertureGasoil), cg = num(r?.indexClotureGasoil);
+      lines.push({ pompe: p.nom, produit: "Essence", ouverture: oe, cloture: ce, volume: Math.max(0, ce - oe) });
+      lines.push({ pompe: p.nom, produit: "Gasoil", ouverture: og, cloture: cg, volume: Math.max(0, cg - og) });
+    });
+    return lines;
+  }, [db.pompes, db.releves, stationId, date]);
+
+  const vJour = stationId ? computeVente(db.releves, db.ventes, stationId, date) : null;
+  const stockJour = stationId ? computeStock(db.releves, db.stocks, stationId, date) : null;
+  const caisseJour = stationId ? computeCaisse(db.releves, db.ventes, db.caisses, stationId, date) : null;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
         <div>
           <h2 className="smi-display text-2xl">Rapport journalier</h2>
-          <p className="text-sm" style={{ color: C.textMuted }}>Synthèse d'une journée, toutes stations confondues — exportable en PDF.</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>Rapport détaillé d'une station pour une journée — exportable en PDF.</p>
         </div>
         <Button variant="ghost" onClick={exportPdf}><Printer size={16} /> Exporter en PDF</Button>
       </div>
 
       <Card className="smi-no-print">
-        <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} allowAll /></Field>
+          <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+        </div>
       </Card>
 
-      <div className="smi-print-area">
-        <div className="hidden smi-print-only mb-4">
-          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport journalier</h1>
-          <p style={{ fontSize: 13, color: "#444" }}>{fmtDateLong(date)}</p>
+      {!stationId ? (
+        // Aucune station choisie : synthèse comparative de toutes les stations.
+        <div className="smi-print-area">
+          <div className="hidden smi-print-only mb-4">
+            <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport journalier</h1>
+            <p style={{ fontSize: 13, color: "#444" }}>{fmtDateLong(date)}</p>
+          </div>
+          <Card>
+            <p className="font-semibold text-sm mb-3">Synthèse toutes stations — {fmtDateLong(date)}</p>
+            <div className="overflow-x-auto smi-scroll">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>Station</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Essence</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Gasoil</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>CA</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart stock</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart caisse</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Inspection</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    const dv = r.station.devise || "GNF";
+                    const ecartStock = r.stock ? (r.stock.ecartEssence ?? 0) + (r.stock.ecartGasoil ?? 0) : null;
+                    return (
+                      <tr key={r.station.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <td className="py-1.5 font-semibold">{r.station.nom}</td>
+                        <td className="py-1.5 text-right smi-mono">{fmtVol(r.v.essence)}</td>
+                        <td className="py-1.5 text-right smi-mono">{fmtVol(r.v.gasoil)}</td>
+                        <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: C.amber }}>{fmtMontant(r.v.ca, dv)}</td>
+                        <td className="py-1.5 text-right smi-mono">{r.stock ? fmtVol(ecartStock) : "—"}</td>
+                        <td className="py-1.5 text-right smi-mono">{r.caisse && r.caisse.ecart !== null ? fmtMontant(r.caisse.ecart, dv) : "—"}</td>
+                        <td className="py-1.5 text-right">
+                          {r.inspections.length === 0 ? "—" : (
+                            <Pill tone={r.inspections.some((i) => i.items.some((x) => x.status === "non_conforme")) ? "danger" : "success"}>
+                              {r.inspections.length} fait(s)
+                            </Pill>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {rows.length === 0 && (
+                    <tr><td colSpan={7} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune station enregistrée.</td></tr>
+                  )}
+                </tbody>
+                {rows.length > 0 && (
+                  <tfoot>
+                    <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                      <td className="py-2 font-bold">Total</td>
+                      <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vEssence)}</td>
+                      <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vGasoil)}</td>
+                      <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{grandTotalCaDisplay}</td>
+                      <td colSpan={3}></td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </Card>
+        </div>
+      ) : (
+        // Station choisie : rapport détaillé au format papier (index pompes, stock, caisse).
+        <div className="smi-print-area">
+          <Card>
+            <div className="mb-3">
+              <p className="smi-display text-lg uppercase">Station Service {station?.nom} — Rapport journalier</p>
+              <div className="flex gap-6 text-xs mt-1" style={{ color: C.textMuted }}>
+                <span>Date : <span className="font-semibold" style={{ color: C.text }}>{fmtDateLong(date)}</span></span>
+                <span>Fournisseur : <span className="font-semibold" style={{ color: C.text }}>{station?.fournisseur || "—"}</span></span>
+              </div>
+            </div>
+
+            <p className="text-sm font-semibold mt-4 mb-2">1. Index des pompes</p>
+            <div className="overflow-x-auto smi-scroll">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <th className="text-left py-1" style={{ color: C.textMuted }}>Pompe</th>
+                    <th className="text-left py-1" style={{ color: C.textMuted }}>Produit</th>
+                    <th className="text-right py-1" style={{ color: C.textMuted }}>Index ouverture (L)</th>
+                    <th className="text-right py-1" style={{ color: C.textMuted }}>Index clôture (L)</th>
+                    <th className="text-right py-1" style={{ color: C.textMuted }}>Volume vendu (L)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pompeLines.map((l, i) => (
+                    <tr key={i} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1">{l.pompe}</td>
+                      <td className="py-1">{l.produit}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(l.ouverture)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(l.cloture)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(l.volume)}</td>
+                    </tr>
+                  ))}
+                  {pompeLines.length === 0 && <tr><td colSpan={5} className="py-4 text-center" style={{ color: C.textFaint }}>Aucune pompe / aucun relevé pour cette date.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+
+            {vJour && (
+              <div className="mt-3 overflow-x-auto smi-scroll">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <th className="text-left py-1" style={{ color: C.textMuted }}>Libellé</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Volume (L)</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Prix unitaire ({devise})</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1">Vente Essence</td><td className="py-1 text-right smi-mono">{fmtVol(vJour.essence)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtMontant(vJour.prixEssence, devise)}</td><td className="py-1 text-right smi-mono">{fmtMontant(vJour.montantEssence, devise)}</td>
+                    </tr>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1">Vente Gasoil</td><td className="py-1 text-right smi-mono">{fmtVol(vJour.gasoil)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtMontant(vJour.prixGasoil, devise)}</td><td className="py-1 text-right smi-mono">{fmtMontant(vJour.montantGasoil, devise)}</td>
+                    </tr>
+                    <tr>
+                      <td className="py-1 font-bold">Vente Totale</td><td className="py-1 text-right smi-mono font-bold">{fmtVol(vJour.essence + vJour.gasoil)}</td>
+                      <td></td><td className="py-1 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(vJour.ca, devise)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <p className="text-sm font-semibold mt-5 mb-2">2. Stock carburant</p>
+            {stockJour && (
+              <div className="overflow-x-auto smi-scroll">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <th className="text-left py-1" style={{ color: C.textMuted }}>Produit</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Stock ouverture (L)</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Ventes (L)</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Livraisons (L)</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Stock clôture (L)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1">Essence</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureEssence)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.essence)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonEssence)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockClotureEssence)}</td>
+                    </tr>
+                    <tr>
+                      <td className="py-1">Gasoil</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureGasoil)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.gasoil)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonGasoil)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockClotureGasoil)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <p className="text-sm font-semibold mt-5 mb-2">3. Coupon de Bon, Versement et Caisse</p>
+            {caisseJour && (
+              <>
+                <p className="text-xs font-semibold italic mb-1" style={{ color: C.textMuted }}>Coupon de Bon</p>
+                <div className="overflow-x-auto smi-scroll mb-2">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <th className="text-left py-1" style={{ color: C.textMuted }}>Libellé</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Quantité (L)</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Prix unitaire ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Frais de route ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {caisseJour.bons.map((b) => (
+                        <tr key={b.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                          <td className="py-1">{b.libelle || "—"}</td>
+                          <td className="py-1 text-right smi-mono">{fmtVol(b.quantite)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(b.prixUnitaire, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(b.fraisRoute, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute), devise)}</td>
+                        </tr>
+                      ))}
+                      {caisseJour.bons.length === 0 && <tr><td colSpan={5} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
+                    </tbody>
+                    <tfoot>
+                      <tr style={{ borderTop: `1px solid ${C.border}` }}>
+                        <td colSpan={4} className="py-1 font-bold">Total Bons</td>
+                        <td className="py-1 text-right smi-mono font-bold">{fmtMontant(caisseJour.totalBon, devise)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                <p className="text-xs font-semibold italic mb-1 mt-3" style={{ color: C.textMuted }}>Coupon de Versement</p>
+                <div className="overflow-x-auto smi-scroll mb-2">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <th className="text-left py-1" style={{ color: C.textMuted }}>Libellé</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Versement bancaire ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Code marchand ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Autre versement ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {caisseJour.versements.map((v) => (
+                        <tr key={v.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                          <td className="py-1">{v.libelle || "—"}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(v.versementBancaire, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(v.codeMarchand, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(v.autreVersement, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement), devise)}</td>
+                        </tr>
+                      ))}
+                      {caisseJour.versements.length === 0 && <tr><td colSpan={5} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
+                    </tbody>
+                    <tfoot>
+                      <tr style={{ borderTop: `1px solid ${C.border}` }}>
+                        <td colSpan={4} className="py-1 font-bold">Total Versement</td>
+                        <td className="py-1 text-right smi-mono font-bold">{fmtMontant(caisseJour.totalVersement, devise)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                <p className="text-xs font-semibold italic mb-1 mt-3" style={{ color: C.textMuted }}>Caisse</p>
+                <div className="overflow-x-auto smi-scroll">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Caisse précédente ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Caisse du jour ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Total Bon ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Paiement marchand ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Caisse attendue ({devise})</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.caissePrecedente, devise)}</td>
+                        <td className="py-1 text-right smi-mono">{caisseJour.caisseDuJour === null ? "—" : fmtMontant(caisseJour.caisseDuJour, devise)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.totalBon, devise)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.totalPaiementMarchand, devise)}</td>
+                        <td className="py-1 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(caisseJour.caisseAttendue, devise)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Caisse du Jour − Total Bon − Total Versement − Paiement marchand</p>
+              </>
+            )}
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- Sécurité ---------------------------------- */
+
+function SecuriteView({ profile }) {
+  const [oldPin, setOldPin] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [msg, setMsg] = useState(null); // { type: "ok" | "err", text }
+  const [busy, setBusy] = useState(false);
+
+  const changePin = async () => {
+    setMsg(null);
+    if (newPin.trim().length < 4) { setMsg({ type: "err", text: "Le nouveau code doit faire au moins 4 chiffres." }); return; }
+    if (newPin.trim() !== confirmPin.trim()) { setMsg({ type: "err", text: "La confirmation ne correspond pas au nouveau code." }); return; }
+    setBusy(true);
+    try {
+      const r = await storage.get(ADMIN_PIN_KEY);
+      const currentHash = r?.value;
+      if (hashPin(oldPin.trim()) !== currentHash) { setMsg({ type: "err", text: "Code PIN actuel incorrect." }); setBusy(false); return; }
+      await storage.set(ADMIN_PIN_KEY, hashPin(newPin.trim()));
+      setMsg({ type: "ok", text: "Code PIN administrateur mis à jour." });
+      setOldPin(""); setNewPin(""); setConfirmPin("");
+    } catch {
+      setMsg({ type: "err", text: "Impossible de vérifier le code PIN pour le moment. Réessayez." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Sécurité</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Changer le code PIN administrateur. Pour les codes PIN de station, rendez-vous dans Stations.</p>
+      </div>
+
+      <Card className="max-w-md">
+        <div className="flex flex-col gap-3">
+          <Field label="Code PIN actuel">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={oldPin} onChange={(e) => setOldPin(e.target.value)} placeholder="••••" />
+          </Field>
+          <Field label="Nouveau code PIN">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="••••" />
+          </Field>
+          <Field label="Confirmer le nouveau code PIN">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={confirmPin} onChange={(e) => setConfirmPin(e.target.value)} placeholder="••••" />
+          </Field>
         </div>
 
-        <Card>
-          <p className="font-semibold text-sm mb-3">Synthèse — {fmtDateLong(date)}</p>
-          <div className="overflow-x-auto smi-scroll">
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Station</th>
-                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Essence</th>
-                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Gasoil</th>
-                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>CA</th>
-                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart stock</th>
-                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart caisse</th>
-                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Inspection</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const devise = r.station.devise || "GNF";
-                  const ecartStock = r.stock ? (r.stock.ecartEssence ?? 0) + (r.stock.ecartGasoil ?? 0) : null;
-                  return (
-                    <tr key={r.station.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                      <td className="py-1.5 font-semibold">{r.station.nom}</td>
-                      <td className="py-1.5 text-right smi-mono">{fmtVol(r.v.essence)}</td>
-                      <td className="py-1.5 text-right smi-mono">{fmtVol(r.v.gasoil)}</td>
-                      <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: C.amber }}>{fmtMontant(r.v.ca, devise)}</td>
-                      <td className="py-1.5 text-right smi-mono">{r.stock ? fmtVol(ecartStock) : "—"}</td>
-                      <td className="py-1.5 text-right smi-mono">{r.caisse && r.caisse.ecart !== null ? fmtMontant(r.caisse.ecart, devise) : "—"}</td>
-                      <td className="py-1.5 text-right">
-                        {r.inspections.length === 0 ? "—" : (
-                          <Pill tone={r.inspections.some((i) => i.items.some((x) => x.status === "non_conforme")) ? "danger" : "success"}>
-                            {r.inspections.length} fait(s)
-                          </Pill>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {rows.length === 0 && (
-                  <tr><td colSpan={7} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune station enregistrée.</td></tr>
-                )}
-              </tbody>
-              {rows.length > 0 && (
-                <tfoot>
-                  <tr style={{ borderTop: `2px solid ${C.border}` }}>
-                    <td className="py-2 font-bold">Total</td>
-                    <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vEssence)}</td>
-                    <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vGasoil)}</td>
-                    <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{grandTotalCaDisplay}</td>
-                    <td colSpan={3}></td>
-                  </tr>
-                </tfoot>
-              )}
-            </table>
-          </div>
-        </Card>
-      </div>
+        {msg && (
+          <p className="text-xs flex items-center gap-1.5 mt-3" style={{ color: msg.type === "ok" ? C.success : C.danger }}>
+            {msg.type === "ok" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />} {msg.text}
+          </p>
+        )}
+
+        <div className="flex justify-end mt-4">
+          <Button onClick={changePin} disabled={busy || !oldPin || !newPin || !confirmPin}>
+            {busy ? "Vérification…" : "Changer le code PIN"}
+          </Button>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -1730,6 +2095,7 @@ const TABS = [
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
   { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: true },
   { key: "journal", label: "Journal des saisies", icon: History, adminOnly: true },
+  { key: "securite", label: "Sécurité", icon: Lock, adminOnly: true },
 ];
 
 export default function App() {
@@ -1770,6 +2136,7 @@ export default function App() {
       case "rapport": return <RapportMensuelView db={db} />;
       case "rapport_jour": return <RapportJournalierView db={db} />;
       case "journal": return <AuditLogView db={db} />;
+      case "securite": return <SecuriteView profile={profile} />;
       default: return null;
     }
   };
