@@ -187,7 +187,11 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
   const totalBon = c.bons ? sumBons(bons) : num(c.totalBon);
   const totalVersement = c.versements ? sumVersements(versements) : num(c.totalVersement);
   const totalPaiementMarchand = num(c.totalPaiementMarchand);
-  const caisseAttendue = caissePrecedente + ca - totalBon - totalVersement - totalPaiementMarchand;
+  // Le versement (dépôt bancaire du jour) n'entre plus dans le calcul de la caisse
+  // attendue : il ne fait que documenter où est allée une partie de la caisse déjà
+  // comptée, contrairement au Bon et au Paiement marchand qui, eux, réduisent
+  // effectivement l'argent liquide encaissé.
+  const caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
   return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
@@ -1105,8 +1109,6 @@ function CaisseView({ db, setDb, profile }) {
   const [stationId, setStationId] = useState(profile.stationId || db.stations[0]?.id || "");
   const [date, setDate] = useState(todayISO());
   const c = computeCaisse(db.releves, db.ventes, db.caisses, stationId, date);
-  const prevRec = latestBefore(db.caisses, stationId, date);
-  const prevComputed = prevRec ? computeCaisse(db.releves, db.ventes, db.caisses, stationId, prevRec.date) : null;
 
   const [precedente, setPrecedente] = useState("");
   const [duJour, setDuJour] = useState("");
@@ -1121,8 +1123,14 @@ function CaisseView({ db, setDb, profile }) {
       setVersements(c.record.versements || (c.record.totalVersement ? [{ id: uid(), libelle: "Versement", versementBancaire: c.record.totalVersement, codeMarchand: "", autreVersement: "" }] : []));
       setPaiementMarchand(c.record.totalPaiementMarchand ?? "");
     } else {
-      setPrecedente(prevComputed ? String(prevComputed.caisseAttendue) : "");
-      setDuJour(""); setBons([]); setVersements([]); setPaiementMarchand("");
+      // Saisie manuelle obligatoire : le jour où le gérant verse tout l'argent déclaré,
+      // il met 0 ici — on ne présume plus que la caisse précédente se reporte
+      // automatiquement, puisque ça dépend de ce qui a réellement été laissé en caisse.
+      setPrecedente("");
+      // Pré-rempli avec le CA du jour (calculé depuis les ventes) — modifiable si le
+      // comptage réel du gérant diffère.
+      setDuJour(c.ca ? String(c.ca) : "");
+      setBons([]); setVersements([]); setPaiementMarchand("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
@@ -1165,8 +1173,8 @@ function CaisseView({ db, setDb, profile }) {
         </div>
 
         <div className="grid sm:grid-cols-2 gap-3">
-          <Field label={`Caisse précédente (${devise})`} hint="Pré-remplie depuis la veille"><NumberInput value={precedente} onChange={(e) => setPrecedente(e.target.value)} /></Field>
-          <Field label={`Caisse du jour — comptage (${devise})`}><NumberInput value={duJour} onChange={(e) => setDuJour(e.target.value)} /></Field>
+          <Field label={`Caisse précédente (${devise})`} hint="À saisir manuellement — mettez 0 si tout a été versé la veille"><NumberInput value={precedente} onChange={(e) => setPrecedente(e.target.value)} /></Field>
+          <Field label={`Caisse du jour — comptage (${devise})`} hint={!c.record ? "Pré-rempli avec le CA du jour, à corriger selon le comptage réel" : undefined}><NumberInput value={duJour} onChange={(e) => setDuJour(e.target.value)} /></Field>
           <Field label={`Paiement marchand (${devise})`} hint="Mobile money, carte, tout paiement non encaissé en espèces"><NumberInput value={paiementMarchand} onChange={(e) => setPaiementMarchand(e.target.value)} /></Field>
         </div>
 
@@ -1945,7 +1953,7 @@ function RapportJournalierView({ db }) {
                     <tbody>
                       <tr>
                         <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.caissePrecedente, devise)}</td>
-                        <td className="py-1 text-right smi-mono">{caisseJour.caisseDuJour === null ? "—" : fmtMontant(caisseJour.caisseDuJour, devise)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.caisseDuJour === null ? caisseJour.ca : caisseJour.caisseDuJour, devise)}</td>
                         <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.totalBon, devise)}</td>
                         <td className="py-1 text-right smi-mono">{fmtMontant(caisseJour.totalPaiementMarchand, devise)}</td>
                         <td className="py-1 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(caisseJour.caisseAttendue, devise)}</td>
@@ -1953,7 +1961,7 @@ function RapportJournalierView({ db }) {
                     </tbody>
                   </table>
                 </div>
-                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Caisse du Jour − Total Bon − Total Versement − Paiement marchand</p>
+                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Chiffre d'affaires du jour − Total Bon − Paiement marchand (le Versement n'est pas déduit : il documente le dépôt d'une partie de la caisse déjà comptée)</p>
               </>
             )}
           </Card>
