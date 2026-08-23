@@ -940,7 +940,8 @@ function RelevePompesView({ db, setDb, profile }) {
 /* -------------------------------- Ventes view ------------------------------ */
 
 function VentesView({ db, setDb, profile }) {
-  const [stationId, setStationId] = useState(db.stations[0]?.id || "");
+  const isGerant = profile.role === "gerant";
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
   const [date, setDate] = useState(todayISO());
   const v = computeVente(db.releves, db.ventes, stationId, date);
   const [prixEssence, setPrixEssence] = useState("");
@@ -957,11 +958,12 @@ function VentesView({ db, setDb, profile }) {
 
   const save = () => {
     setErr("");
-    if (!stationId) return;
+    const effStationId = isGerant ? profile.stationId : stationId;
+    if (!effStationId) return;
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    const row = { id: v.record?.id || uid(), stationId, date, prixEssence, prixGasoil };
+    const row = { id: v.record?.id || uid(), stationId: effStationId, date, prixEssence, prixGasoil };
     let next = { ...db, ventes: v.record ? db.ventes.map((x) => (x.id === v.record.id ? row : x)) : [...db.ventes, row] };
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "vente", action: v.record ? "modification" : "création", after: { date, prixEssence, prixGasoil } });
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "vente", action: v.record ? "modification" : "création", after: { date, prixEssence, prixGasoil } });
     setDb(next);
   };
 
@@ -976,7 +978,7 @@ function VentesView({ db, setDb, profile }) {
 
       <Card>
         <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} /></Field>
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
         </div>
 
@@ -1646,8 +1648,9 @@ function RapportMensuelView({ db }) {
 
 /* ------------------------------ Rapport journalier ---------------------------- */
 
-function RapportJournalierView({ db }) {
-  const [stationId, setStationId] = useState(db.stations[0]?.id || "");
+function RapportJournalierView({ db, profile }) {
+  const isGerant = profile.role === "gerant";
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
   const [date, setDate] = useState(todayISO());
 
   const rows = useMemo(() => db.stations.map((s) => {
@@ -1700,7 +1703,7 @@ function RapportJournalierView({ db }) {
 
       <Card className="smi-no-print">
         <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} allowAll /></Field>
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} allowAll={!isGerant} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
         </div>
       </Card>
@@ -2096,12 +2099,12 @@ const TABS = [
   { key: "stations", label: "Stations", icon: Building2, adminOnly: true },
   { key: "pompes", label: "Pompes", icon: Gauge, adminOnly: true },
   { key: "releve", label: "Relevé Pompes", icon: Fuel, adminOnly: false },
-  { key: "ventes", label: "Ventes", icon: Wallet, adminOnly: true },
+  { key: "ventes", label: "Ventes", icon: Wallet, adminOnly: false },
   { key: "stock", label: "Contrôle Stock", icon: Warehouse, adminOnly: false },
   { key: "caisse", label: "Caisse", icon: Wallet, adminOnly: false },
   { key: "inspection", label: "Inspection", icon: ClipboardCheck, adminOnly: false },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
-  { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: true },
+  { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: false },
   { key: "journal", label: "Journal des saisies", icon: History, adminOnly: true },
   { key: "securite", label: "Sécurité", icon: Lock, adminOnly: true },
 ];
@@ -2142,7 +2145,7 @@ export default function App() {
       case "caisse": return <CaisseView db={db} setDb={setDb} profile={profile} />;
       case "inspection": return <InspectionView db={db} setDb={setDb} profile={profile} />;
       case "rapport": return <RapportMensuelView db={db} />;
-      case "rapport_jour": return <RapportJournalierView db={db} />;
+      case "rapport_jour": return <RapportJournalierView db={db} profile={profile} />;
       case "journal": return <AuditLogView db={db} />;
       case "securite": return <SecuriteView profile={profile} />;
       default: return null;
