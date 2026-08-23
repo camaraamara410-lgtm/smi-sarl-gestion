@@ -568,18 +568,18 @@ function RoleGate({ db, onSet }) {
         )}
 
         <Field label="Votre nom" hint="Utilisé pour identifier vos saisies dans le journal.">
-          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" value={name} onChange={(e) => setName(e.target.value)} placeholder="ex : Mamadou Diallo" />
+          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={name} onChange={(e) => setName(e.target.value)} placeholder="ex : Mamadou Diallo" />
         </Field>
 
         {role === "admin" && (
           <Field label={isFirstAdmin ? "Créer le code PIN administrateur" : "Code PIN administrateur"} hint={isFirstAdmin ? "Première connexion : ce code sera demandé à chaque accès admin." : undefined}>
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
           </Field>
         )}
 
         {role === "gerant" && stationHasPin && (
           <Field label="Code PIN de la station">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
           </Field>
         )}
         {role === "gerant" && stationId && !stationHasPin && (
@@ -655,7 +655,7 @@ function StationsView({ db, setDb, profile }) {
             <Field label="Localisation"><TextInput value={form.localisation || ""} onChange={(e) => setForm({ ...form, localisation: e.target.value })} placeholder="Ex. Conakry, Kaloum" /></Field>
             <Field label="Devise"><TextInput value={form.devise ?? "GNF"} onChange={(e) => setForm({ ...form, devise: e.target.value })} /></Field>
             <Field label={form.pinHash ? "Changer le code PIN de la station" : "Code PIN de la station (optionnel)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver." : "Demandé au gérant à la connexion s'il est défini."}>
-              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={pinInput} onChange={(e) => setPinInput(e.target.value)} placeholder="••••" />
+              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pinInput} onChange={(e) => setPinInput(e.target.value)} placeholder="••••" />
             </Field>
           </div>
           <div className="flex gap-2 mt-4">
@@ -1194,10 +1194,10 @@ function CaisseView({ db, setDb, profile }) {
                 const montant = num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute);
                 return (
                   <div key={b.id} className="rounded-md p-2.5 grid gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, gridTemplateColumns: "1.4fr 0.8fr 0.9fr 0.9fr auto" }}>
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" placeholder="Libellé (ex : Citerne BI 7077)" value={b.libelle} onChange={(e) => updateBon(b.id, "libelle", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Quantité (L)" value={b.quantite} onChange={(e) => updateBon(b.id, "quantite", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder={`Prix unit. (${devise})`} value={b.prixUnitaire} onChange={(e) => updateBon(b.id, "prixUnitaire", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Frais de route" value={b.fraisRoute} onChange={(e) => updateBon(b.id, "fraisRoute", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé (ex : Citerne BI 7077)" value={b.libelle} onChange={(e) => updateBon(b.id, "libelle", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Quantité (L)" value={b.quantite} onChange={(e) => updateBon(b.id, "quantite", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder={`Prix unit. (${devise})`} value={b.prixUnitaire} onChange={(e) => updateBon(b.id, "prixUnitaire", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Frais de route" value={b.fraisRoute} onChange={(e) => updateBon(b.id, "fraisRoute", e.target.value)} />
                     <button onClick={() => removeBon(b.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
                     <p className="text-xs col-span-5 text-right" style={{ color: C.textFaint }}>Montant : <span className="smi-mono">{fmtMontant(montant, devise)}</span></p>
                   </div>
@@ -1222,10 +1222,10 @@ function CaisseView({ db, setDb, profile }) {
                 const montant = num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement);
                 return (
                   <div key={v.id} className="rounded-md p-2.5 grid gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, gridTemplateColumns: "1.2fr 0.9fr 0.9fr 0.9fr auto" }}>
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" placeholder="Libellé" value={v.libelle} onChange={(e) => updateVersement(v.id, "libelle", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Versement bancaire" value={v.versementBancaire} onChange={(e) => updateVersement(v.id, "versementBancaire", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Code marchand" value={v.codeMarchand} onChange={(e) => updateVersement(v.id, "codeMarchand", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" type="number" placeholder="Autre versement" value={v.autreVersement} onChange={(e) => updateVersement(v.id, "autreVersement", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé" value={v.libelle} onChange={(e) => updateVersement(v.id, "libelle", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Versement bancaire" value={v.versementBancaire} onChange={(e) => updateVersement(v.id, "versementBancaire", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Code marchand" value={v.codeMarchand} onChange={(e) => updateVersement(v.id, "codeMarchand", e.target.value)} />
+                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Autre versement" value={v.autreVersement} onChange={(e) => updateVersement(v.id, "autreVersement", e.target.value)} />
                     <button onClick={() => removeVersement(v.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
                     <p className="text-xs col-span-5 text-right" style={{ color: C.textFaint }}>Montant : <span className="smi-mono">{fmtMontant(montant, devise)}</span></p>
                   </div>
@@ -1352,6 +1352,7 @@ function InspectionView({ db, setDb, profile }) {
               {items[c.id]?.status === "non_conforme" && (
                 <input
                   className="smi-input w-full rounded-md px-3 py-1.5 text-xs mt-2"
+                  style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }}
                   placeholder="Remarque (optionnel)"
                   value={items[c.id]?.note || ""}
                   onChange={(e) => setItemNote(c.id, e.target.value)}
@@ -1363,7 +1364,7 @@ function InspectionView({ db, setDb, profile }) {
 
         <div className="mt-3">
           <Field label="Observations générales (optionnel)">
-            <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" rows={3} value={observations} onChange={(e) => setObservations(e.target.value)} />
+            <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} rows={3} value={observations} onChange={(e) => setObservations(e.target.value)} />
           </Field>
         </div>
 
@@ -2012,13 +2013,13 @@ function SecuriteView({ profile }) {
       <Card className="max-w-md">
         <div className="flex flex-col gap-3">
           <Field label="Code PIN actuel">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={oldPin} onChange={(e) => setOldPin(e.target.value)} placeholder="••••" />
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={oldPin} onChange={(e) => setOldPin(e.target.value)} placeholder="••••" />
           </Field>
           <Field label="Nouveau code PIN">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="••••" />
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="••••" />
           </Field>
           <Field label="Confirmer le nouveau code PIN">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" type="password" inputMode="numeric" value={confirmPin} onChange={(e) => setConfirmPin(e.target.value)} placeholder="••••" />
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={confirmPin} onChange={(e) => setConfirmPin(e.target.value)} placeholder="••••" />
           </Field>
         </div>
 
