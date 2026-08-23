@@ -8,6 +8,11 @@
 // En développement local sans le backend configuré (npm run dev sans /api fonctionnel), ou
 // si l'appel réseau échoue, on bascule automatiquement sur localStorage puis sur la mémoire,
 // pour que l'application reste testable.
+//
+// Chaque appel inclut le jeton d'application (VITE_APP_TOKEN) dans l'en-tête x-app-token,
+// vérifié côté serveur par api/kv.js — voir la note de sécurité dans ce fichier.
+
+const APP_TOKEN = import.meta.env.VITE_APP_TOKEN || "";
 
 function localStorageWorks() {
   try {
@@ -26,7 +31,7 @@ let apiReachable = true; // repasse à false dès qu'un appel réseau échoue, p
 async function storageGet(key) {
   if (apiReachable) {
     try {
-      const r = await fetch(`/api/kv?key=${encodeURIComponent(key)}`);
+      const r = await fetch(`/api/kv?key=${encodeURIComponent(key)}`, { headers: { "x-app-token": APP_TOKEN } });
       if (r.status === 404) throw new Error("not found");
       if (!r.ok) throw new Error(`API error ${r.status}`);
       const data = await r.json();
@@ -49,7 +54,7 @@ async function storageSet(key, value) {
     try {
       const r = await fetch("/api/kv", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-app-token": APP_TOKEN },
         body: JSON.stringify({ key, value }),
       });
       if (!r.ok) throw new Error(`API error ${r.status}`);
@@ -69,7 +74,7 @@ async function storageSet(key, value) {
 async function storageDelete(key) {
   if (apiReachable) {
     try {
-      const r = await fetch(`/api/kv?key=${encodeURIComponent(key)}`, { method: "DELETE" });
+      const r = await fetch(`/api/kv?key=${encodeURIComponent(key)}`, { method: "DELETE", headers: { "x-app-token": APP_TOKEN } });
       if (!r.ok) throw new Error(`API error ${r.status}`);
       return { key, deleted: true };
     } catch {

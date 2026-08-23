@@ -7,6 +7,15 @@ import { MongoClient } from "mongodb";
 //
 // Le client web (src/storage.js) appelle cette fonction via /api/kv au lieu de parler à
 // MongoDB directement.
+//
+// Protection par jeton d'application (APP_TOKEN) : sans ce jeton dans l'en-tête de chaque
+// requête, l'API refuse de répondre. Ça bloque tout robot ou visiteur qui tomberait
+// simplement sur l'adresse de l'API sans jamais avoir chargé l'application elle-même.
+// Honnêteté sur la limite : ce jeton est inclus dans le code JavaScript envoyé au
+// navigateur (nécessaire pour que l'app puisse l'utiliser) — une personne qui inspecte
+// délibérément ce code peut donc le retrouver. Ce n'est pas une authentification
+// utilisateur réelle, mais ça relève sérieusement la barrière par rapport à une API
+// totalement ouverte, et bloque l'immense majorité des accès non désirés.
 
 const DB_NAME = "smi_gestion";
 const COLLECTION = "smi_kv";
@@ -22,6 +31,18 @@ function getClient() {
 }
 
 export default async function handler(req, res) {
+  const expectedToken = process.env.APP_TOKEN;
+  if (expectedToken) {
+    const provided = req.headers["x-app-token"];
+    if (provided !== expectedToken) {
+      return res.status(401).json({ error: "Non autorisé." });
+    }
+  }
+  // Si APP_TOKEN n'est pas configuré côté serveur, l'API reste ouverte (comportement
+  // précédent) — ça évite de casser l'application si la variable n'a pas encore été
+  // ajoutée, mais la protection ne s'active réellement qu'une fois APP_TOKEN défini
+  // sur Vercel (voir README).
+
   try {
     const client = await getClient();
     const col = client.db(DB_NAME).collection(COLLECTION);

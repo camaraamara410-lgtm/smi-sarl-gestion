@@ -84,6 +84,8 @@ que les données apparaissent dans `smi_gestion.smi_kv`.
    réglages de build.
 5. Avant de cliquer "Deploy", ouvrez la section **Environment Variables** et ajoutez :
    - `MONGODB_URI` → la chaîne de connexion complète (étape 1.6)
+   - `APP_TOKEN` → une longue chaîne aléatoire de votre choix (voir section **Sécurité** plus bas)
+   - `VITE_APP_TOKEN` → **exactement la même valeur** que `APP_TOKEN`
 6. Cliquez **Deploy**. Après 1-2 minutes, Vercel vous donne un lien du type
    `https://smi-sarl-gestion.vercel.app` — c'est le lien à partager avec votre équipe.
 
@@ -93,8 +95,44 @@ que les données apparaissent dans `smi_gestion.smi_kv`.
 vercel login
 vercel                 # suit les instructions
 vercel env add MONGODB_URI production
+vercel env add APP_TOKEN production
+vercel env add VITE_APP_TOKEN production
 vercel --prod
 ```
+
+---
+
+## Sécurité
+
+**L'API est maintenant protégée par un jeton d'application.** Auparavant, la fonction
+`/api/kv.js` répondait à n'importe qui connaissait son adresse, sans aucune vérification —
+un visiteur déterminé pouvait lire ou modifier toutes les données sans jamais passer par
+l'écran de connexion PIN. Ce n'est plus le cas : chaque appel doit maintenant inclure un
+jeton secret (`APP_TOKEN`), sinon l'API répond "Non autorisé".
+
+**Comment configurer ce jeton** :
+1. Générez une longue chaîne aléatoire, difficile à deviner (30+ caractères) — par exemple
+   sur [uuidgenerator.net](https://www.uuidgenerator.net), ou en tapant un mot de passe
+   long au hasard.
+2. Dans Vercel > votre projet > Settings > Environment Variables, ajoutez **deux** variables
+   avec **exactement la même valeur** :
+   - `APP_TOKEN`
+   - `VITE_APP_TOKEN`
+3. Redéployez (Deployments > ⋯ sur le dernier déploiement > Redeploy).
+
+**Ce que ça protège** : bloque les robots, scanners automatiques, et toute personne qui
+tomberait par hasard sur l'adresse de l'API sans jamais avoir chargé l'application.
+
+**Ce que ça ne protège pas — honnêteté sur la limite** : ce jeton est nécessairement inclus
+dans le code JavaScript envoyé au navigateur de chaque utilisateur (l'application en a
+besoin pour fonctionner). Une personne qui inspecte délibérément ce code avec les outils
+de développement de son navigateur peut le retrouver. Ce n'est donc **pas** une
+authentification utilisateur réelle — c'est une barrière contre l'accès non intentionnel
+et automatisé, pas contre une personne motivée et techniquement compétente qui cible
+spécifiquement votre application. Pour une vraie sécurité au niveau utilisateur (comptes,
+mots de passe, sessions), il faudrait un système d'authentification complet côté serveur
+(ex. NextAuth, Clerk, ou Supabase/Firebase Auth) — une évolution possible si le besoin
+grandit.
 
 ---
 
