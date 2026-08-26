@@ -3,7 +3,7 @@ import {
   Fuel, Gauge, Warehouse, Wallet, LayoutDashboard, CalendarRange,
   Building2, Settings2, LogOut, Plus, Trash2, Pencil, AlertTriangle,
   CheckCircle2, X, Loader2, ChevronRight, MapPin, Droplet, Lock, Download, History,
-  ClipboardCheck, Printer, ChevronDown
+  ClipboardCheck, Printer, ChevronDown, Truck, Camera, BookOpen
 } from "lucide-react";
 import { storage, isStorageDegraded, hasLocalStorage } from "./storage.js";
 
@@ -71,6 +71,32 @@ function Logo({ size = 28 }) {
 /* ---------------------------- Helpers -------------------------------- */
 
 const uid = () => (crypto?.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + "-" + Math.random().toString(16).slice(2));
+
+// Redimensionne et compresse une photo prise sur le téléphone avant de la stocker (toute la
+// base de l'application est un seul document JSON — des photos non compressées la
+// feraient grossir très vite). Le résultat reste largement lisible pour vérifier un bon
+// de livraison, tout en restant léger.
+function resizeImage(file, maxWidth = 700, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 // fmtMontant accepte une devise explicite (celle de la station concernée) ; fmtGNF reste
@@ -201,8 +227,8 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -1262,6 +1288,133 @@ function CaisseView({ db, setDb, profile }) {
 
 /* ------------------------------ Inspection view ----------------------------- */
 
+/* ------------------------------- Réception view ----------------------------- */
+
+function ReceptionView({ db, setDb, profile }) {
+  const isGerant = profile.role === "gerant";
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
+  const [date, setDate] = useState(todayISO());
+  const [produit, setProduit] = useState("gasoil");
+  const [quantite, setQuantite] = useState("");
+  const [fournisseur, setFournisseur] = useState("");
+  const [numeroBon, setNumeroBon] = useState("");
+  const [photo, setPhoto] = useState(null);
+  const [err, setErr] = useState("");
+
+  const onPhotoChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImage(file);
+      setPhoto(dataUrl);
+    } catch {
+      setErr("Impossible de lire la photo.");
+    }
+  };
+
+  const reset = () => {
+    setQuantite(""); setFournisseur(""); setNumeroBon(""); setPhoto(null);
+  };
+
+  const save = () => {
+    setErr("");
+    const effStationId = isGerant ? profile.stationId : stationId;
+    if (!effStationId) { setErr("Choisissez une station."); return; }
+    if (!quantite || num(quantite) <= 0) { setErr("Indiquez une quantité valide."); return; }
+    if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const row = { id: uid(), stationId: effStationId, date, produit, quantite, fournisseur, numeroBon, photo, timestamp: new Date().toISOString() };
+    let next = { ...db, receptions: [...db.receptions, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "reception", action: "création", after: { produit, quantite, fournisseur, numeroBon } });
+    setDb(next);
+    reset();
+  };
+
+  const removeReception = (r) => {
+    if (!confirm("Supprimer cette réception ?")) return;
+    let next = { ...db, receptions: db.receptions.filter((x) => x.id !== r.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: r.stationId, entity: "reception", action: "suppression", before: { produit: r.produit, quantite: r.quantite } });
+    setDb(next);
+  };
+
+  const history = db.receptions
+    .filter((r) => (isGerant ? r.stationId === profile.stationId : (!stationId || r.stationId === stationId)))
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.timestamp || "").localeCompare(a.timestamp || "")));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl flex items-center gap-2"><Truck size={22} /> Réception</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement d'une livraison de carburant, avec photo du bon comme preuve.</p>
+      </div>
+
+      <Card className="max-w-md">
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
+          <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <Field label="Produit">
+            <SelectInput value={produit} onChange={(e) => setProduit(e.target.value)}>
+              <option value="gasoil">Gasoil</option>
+              <option value="essence">Essence</option>
+            </SelectInput>
+          </Field>
+          <Field label="Quantité (L)"><NumberInput value={quantite} onChange={(e) => setQuantite(e.target.value)} /></Field>
+          <Field label="Fournisseur">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={fournisseur} onChange={(e) => setFournisseur(e.target.value)} />
+          </Field>
+          <Field label="N° Bon">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={numeroBon} onChange={(e) => setNumeroBon(e.target.value)} />
+          </Field>
+          <Field label="Photo du bon">
+            <label className="smi-btn flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm cursor-pointer" style={{ background: C.panelAlt, border: `1px dashed ${C.border}`, color: C.textMuted }}>
+              <Camera size={18} />
+              {photo ? "Reprendre la photo" : "Prendre une photo"}
+              <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onPhotoChange} />
+            </label>
+            {photo && (
+              <div className="mt-2">
+                <img src={photo} alt="Bon de livraison" className="rounded-md" style={{ maxHeight: 140, border: `1px solid ${C.border}` }} />
+              </div>
+            )}
+          </Field>
+        </div>
+
+        {err && <p className="text-xs flex items-center gap-1.5 mt-3" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+
+        <div className="flex justify-end mt-4">
+          <Button onClick={save}><CheckCircle2 size={16} /> Valider</Button>
+        </div>
+      </Card>
+
+      <Card>
+        <p className="font-semibold text-sm mb-3">Historique des réceptions</p>
+        {history.length === 0 ? (
+          <EmptyState icon={Truck} title="Aucune réception enregistrée" hint="Les livraisons enregistrées apparaîtront ici." />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {history.map((r) => (
+              <div key={r.id} className="rounded-md p-3 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                {r.photo ? (
+                  <img src={r.photo} alt="" className="rounded-md flex-shrink-0" style={{ width: 48, height: 48, objectFit: "cover", border: `1px solid ${C.border}` }} />
+                ) : (
+                  <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 48, height: 48, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Truck size={18} /></div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium">{r.produit === "essence" ? "Essence" : "Gasoil"} — {fmtVol(r.quantite)}</p>
+                  <p className="text-xs truncate" style={{ color: C.textFaint }}>{fmtDateLong(r.date)} · {db.stations.find((s) => s.id === r.stationId)?.nom || "—"} · {r.fournisseur || "—"} {r.numeroBon ? `· Bon n° ${r.numeroBon}` : ""}</p>
+                </div>
+                {!isGerant && <button onClick={() => removeReception(r)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={14} /></button>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function InspectionView({ db, setDb, profile }) {
   const isGerant = profile.role === "gerant";
   const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
@@ -2039,9 +2192,117 @@ function SecuriteView({ profile }) {
   );
 }
 
+/* --------------------------------- Guide d'utilisation ------------------------------- */
+
+const GUIDE_SECTIONS = [
+  {
+    key: "releve", title: "Relevé Pompes", adminOnly: false,
+    text: "Chaque jour, pour chaque pompe : saisissez l'index de clôture (essence et/ou gasoil). L'index d'ouverture se remplit automatiquement avec la clôture du relevé précédent — vous n'avez normalement rien à corriger, sauf en cas de remise à zéro du compteur. Le volume vendu est calculé automatiquement.",
+  },
+  {
+    key: "ventes", title: "Ventes", adminOnly: false,
+    text: "Indiquez le prix de vente du jour pour l'essence et le gasoil. Les volumes viennent automatiquement du Relevé Pompes ; le chiffre d'affaires du jour (CA) est calculé pour vous et sert de base à la Caisse.",
+  },
+  {
+    key: "stock", title: "Contrôle Stock", adminOnly: false,
+    text: "Le stock d'ouverture reprend automatiquement la clôture de la veille. Indiquez les livraisons reçues et le stock physique mesuré (par jaugeage) : l'écart entre stock théorique et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
+  },
+  {
+    key: "caisse", title: "Caisse", adminOnly: false,
+    text: "« Caisse précédente » se saisit manuellement chaque jour (mettez 0 si tout l'argent a été versé la veille). « Caisse du jour » se pré-remplit avec le CA du jour, à corriger selon le comptage réel. Ajoutez une ligne dans « Coupon de Bon » pour chaque bon (carburant non payé en espèces) et dans « Coupon de Versement » pour chaque dépôt bancaire ou paiement par code marchand. Le Versement ne réduit pas la caisse attendue (il documente juste où est allé l'argent déjà compté) ; seuls le Bon et le Paiement marchand la réduisent réellement.",
+  },
+  {
+    key: "inspection", title: "Inspection", adminOnly: false,
+    text: "Grille de contrôle standard (propreté, sécurité incendie, état des pompes, hygiène, EPI, maintenance, éclairage...). Pour chaque point : Conforme, Non conforme (avec remarque), ou N/A si le point ne s'applique pas à cette station ce jour-là. L'historique des inspections passées reste consultable en dessous.",
+  },
+  {
+    key: "reception", title: "Réception", adminOnly: false,
+    text: "À chaque livraison de carburant : produit, quantité, fournisseur, numéro de bon, et une photo du bon de livraison prise directement avec l'appareil photo du téléphone. Sert de preuve et d'historique des livraisons.",
+  },
+  {
+    key: "rapport_jour", title: "Rapport journalier", adminOnly: false,
+    text: "Rapport détaillé d'une station pour une journée précise : index des pompes, ventes, stock, coupon de bon/versement, et synthèse caisse — exactement dans le format papier habituel. Bouton « Exporter en PDF » pour l'enregistrer ou l'imprimer.",
+  },
+  {
+    key: "dashboard", title: "Tableau de bord", adminOnly: true,
+    text: "Vue d'ensemble du réseau : volumes et chiffre d'affaires du mois en cours, station par station, mis à jour automatiquement à chaque saisie d'un gérant.",
+  },
+  {
+    key: "stations", title: "Stations", adminOnly: true,
+    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise). Vous pouvez définir un code PIN par station, demandé au gérant à la connexion.",
+  },
+  {
+    key: "pompes", title: "Pompes", adminOnly: true,
+    text: "Créez les pompes de chaque station — nécessaire avant de pouvoir saisir des relevés.",
+  },
+  {
+    key: "rapport", title: "Rapport mensuel", adminOnly: true,
+    text: "Synthèse consolidée sur un mois, filtrable par station, avec export CSV pour la comptabilité.",
+  },
+  {
+    key: "journal", title: "Journal des saisies", adminOnly: true,
+    text: "Traçabilité complète : qui a créé, modifié ou supprimé quoi, sur quelle station, et à quelle heure. Filtrable par station.",
+  },
+  {
+    key: "securite", title: "Sécurité", adminOnly: true,
+    text: "Changez votre code PIN administrateur (ancien code requis). Les codes PIN de station se changent depuis Stations.",
+  },
+];
+
+function GuideView({ profile }) {
+  const isGerant = profile.role === "gerant";
+  const [openKey, setOpenKey] = useState(isGerant ? "releve" : "dashboard");
+  const sections = GUIDE_SECTIONS.filter((s) => !isGerant || !s.adminOnly);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl flex items-center gap-2"><BookOpen size={22} /> Guide d'utilisation</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>
+          {isGerant
+            ? "Un aperçu rapide de chaque écran auquel vous avez accès. Cliquez sur un module pour dérouler son explication."
+            : "Un aperçu rapide de chaque module de l'application. Cliquez sur un module pour dérouler son explication."}
+        </p>
+      </div>
+
+      <Card>
+        <div className="flex flex-col gap-2">
+          {sections.map((s) => {
+            const open = openKey === s.key;
+            return (
+              <div key={s.key} className="rounded-md" style={{ border: `1px solid ${C.border}` }}>
+                <button onClick={() => setOpenKey(open ? null : s.key)} className="smi-btn w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+                  <span className="text-sm font-medium flex items-center gap-2">
+                    {s.title}
+                    {s.adminOnly && <Pill tone="amber">Admin</Pill>}
+                  </span>
+                  <ChevronDown size={16} style={{ transform: open ? "rotate(180deg)" : "none", color: C.textFaint }} />
+                </button>
+                {open && (
+                  <p className="text-sm px-3 pb-3" style={{ color: C.textMuted, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>{s.text}</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {!isGerant && (
+        <Card>
+          <p className="text-sm font-semibold mb-1">Pour bien démarrer</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>
+            1. Créez vos stations (Stations) — 2. Ajoutez les pompes de chaque station (Pompes) —
+            3. Partagez le lien de l'application à vos gérants, chacun choisit sa station à la connexion.
+          </p>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
@@ -2096,6 +2357,7 @@ function AuditLogView({ db }) {
 /* ---------------------------------- App shell -------------------------------- */
 
 const TABS = [
+  { key: "guide", label: "Guide d'utilisation", icon: BookOpen, adminOnly: false },
   { key: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, adminOnly: true },
   { key: "stations", label: "Stations", icon: Building2, adminOnly: true },
   { key: "pompes", label: "Pompes", icon: Gauge, adminOnly: true },
@@ -2104,6 +2366,7 @@ const TABS = [
   { key: "stock", label: "Contrôle Stock", icon: Warehouse, adminOnly: false },
   { key: "caisse", label: "Caisse", icon: Wallet, adminOnly: false },
   { key: "inspection", label: "Inspection", icon: ClipboardCheck, adminOnly: false },
+  { key: "reception", label: "Réception", icon: Truck, adminOnly: false },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
   { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: false },
   { key: "journal", label: "Journal des saisies", icon: History, adminOnly: true },
@@ -2112,11 +2375,12 @@ const TABS = [
 
 export default function App() {
   const { db, setDb, profile, setProfile, ready, error, retrySave } = useSmiStorage();
-  const [tab, setTab] = useState("releve");
+  const [tab, setTab] = useState("guide");
 
   useEffect(() => {
-    if (profile?.role === "admin") setTab("dashboard");
-    else if (profile?.role === "gerant") setTab("releve");
+    // Le guide s'affiche en premier à chaque connexion, quel que soit le rôle — l'accès
+    // aux modules reste ensuite à un clic dans le menu.
+    if (profile?.role === "admin" || profile?.role === "gerant") setTab("guide");
   }, [profile?.role]);
 
   if (!ready) {
@@ -2137,6 +2401,7 @@ export default function App() {
 
   const renderTab = () => {
     switch (tab) {
+      case "guide": return <GuideView profile={profile} />;
       case "dashboard": return <DashboardView db={db} />;
       case "stations": return <StationsView db={db} setDb={setDb} profile={profile} />;
       case "pompes": return <PompesView db={db} setDb={setDb} profile={profile} />;
@@ -2145,6 +2410,7 @@ export default function App() {
       case "stock": return <StockView db={db} setDb={setDb} profile={profile} />;
       case "caisse": return <CaisseView db={db} setDb={setDb} profile={profile} />;
       case "inspection": return <InspectionView db={db} setDb={setDb} profile={profile} />;
+      case "reception": return <ReceptionView db={db} setDb={setDb} profile={profile} />;
       case "rapport": return <RapportMensuelView db={db} />;
       case "rapport_jour": return <RapportJournalierView db={db} profile={profile} />;
       case "journal": return <AuditLogView db={db} />;
