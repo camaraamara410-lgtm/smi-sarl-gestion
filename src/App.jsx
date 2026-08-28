@@ -201,6 +201,12 @@ function sumBons(bons) {
 function sumVersements(versements) {
   return (versements || []).reduce((a, v) => a + num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement), 0);
 }
+function sumVersementsBancaires(versements) {
+  return (versements || []).reduce((a, v) => a + num(v.versementBancaire), 0);
+}
+function sumAutresVersements(versements) {
+  return (versements || []).reduce((a, v) => a + num(v.autreVersement), 0);
+}
 
 function computeCaisse(releves, ventes, caisses, stationId, date) {
   const c = findCaisse(caisses, stationId, date) || {};
@@ -208,11 +214,15 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
   const caissePrecedente = num(c.caissePrecedente);
   // Rétro-compatibilité : les anciennes saisies avaient un total unique (totalBon/
   // totalVersement) au lieu de lignes détaillées — on ne recalcule depuis les lignes
-  // que si elles existent, sinon on retombe sur l'ancien total simple.
+  // que si elles existent, sinon on retombe sur l'ancien total simple. Le détail
+  // bancaire/autre n'existe que depuis les lignes ; les anciennes saisies sans lignes
+  // n'ont pas cette ventilation et remontent 0 sur ces deux sous-totaux.
   const bons = c.bons || [];
   const versements = c.versements || [];
   const totalBon = c.bons ? sumBons(bons) : num(c.totalBon);
   const totalVersement = c.versements ? sumVersements(versements) : num(c.totalVersement);
+  const totalVersementBancaire = sumVersementsBancaires(versements);
+  const totalAutreVersement = sumAutresVersements(versements);
   const totalPaiementMarchand = num(c.totalPaiementMarchand);
   // Le versement (dépôt bancaire du jour) n'entre plus dans le calcul de la caisse
   // attendue : il ne fait que documenter où est allée une partie de la caisse déjà
@@ -221,10 +231,10 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
   const caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
-  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
+  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalVersementBancaire, totalAutreVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
 }
 
-function sumDecaissements(items) {
+function sumVersementsPompiste(items) {
   return (items || []).reduce((a, d) => a + num(d.montant), 0);
 }
 function sumBonsPompe(items) {
@@ -232,11 +242,11 @@ function sumBonsPompe(items) {
 }
 
 // Caisse d'un pompiste = valeur des volumes vendus à SA pompe (au prix du jour fixé
-// par le gérant) − ses décaissements − ses bons, pour une pompe et une date données.
+// par le gérant) − ses versements − ses bons, pour une pompe et une date données.
 // Contrairement à la Caisse "station" (qui part d'un comptage manuel + caisse
 // précédente reportée), la caisse pompiste est entièrement recalculée depuis les
 // relevés d'index : elle sert de contrôle du liquide qu'un pompiste doit remettre.
-function computeCaissePompiste(releves, ventes, decaissements, bonsPompe, stationId, pompeId, date) {
+function computeCaissePompiste(releves, ventes, versementsPompiste, bonsPompe, stationId, pompeId, date) {
   const rows = releves.filter((r) => r.stationId === stationId && r.pompeId === pompeId && r.date === date);
   let essence = 0, gasoil = 0;
   rows.forEach((r) => {
@@ -250,15 +260,15 @@ function computeCaissePompiste(releves, ventes, decaissements, bonsPompe, statio
   const montantEssence = essence * prixEssence;
   const montantGasoil = gasoil * prixGasoil;
   const montantVente = montantEssence + montantGasoil;
-  const dItems = (decaissements || []).filter((d) => d.stationId === stationId && d.pompeId === pompeId && d.date === date);
+  const vItems = (versementsPompiste || []).filter((d) => d.stationId === stationId && d.pompeId === pompeId && d.date === date);
   const bItems = (bonsPompe || []).filter((b) => b.stationId === stationId && b.pompeId === pompeId && b.date === date);
-  const totalDecaissement = sumDecaissements(dItems);
+  const totalVersementPompiste = sumVersementsPompiste(vItems);
   const totalBon = sumBonsPompe(bItems);
-  const caisse = montantVente - totalDecaissement - totalBon;
+  const caisse = montantVente - totalVersementPompiste - totalBon;
   return {
     essence, gasoil, volumeTotal: essence + gasoil, releveCount: rows.length,
     prixDefini, prixEssence, prixGasoil, montantEssence, montantGasoil, montantVente,
-    decaissements: dItems, bonsPompe: bItems, totalDecaissement, totalBon, caisse,
+    versementsPompiste: vItems, bonsPompe: bItems, totalVersementPompiste, totalBon, caisse,
   };
 }
 
@@ -266,8 +276,8 @@ function computeCaissePompiste(releves, ventes, decaissements, bonsPompe, statio
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], pompistes: [], releves: [], ventes: [], stocks: [], caisses: [], decaissements: [], bonsPompe: [], inspections: [], receptions: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "pompistes", "releves", "ventes", "stocks", "caisses", "decaissements", "bonsPompe", "inspections", "receptions"];
+const emptyDb = { stations: [], pompes: [], pompistes: [], releves: [], ventes: [], stocks: [], caisses: [], versementsPompiste: [], bonsPompe: [], inspections: [], receptions: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "pompistes", "releves", "ventes", "stocks", "caisses", "versementsPompiste", "bonsPompe", "inspections", "receptions"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -1389,31 +1399,31 @@ function CaisseView({ db, setDb, profile }) {
 /* ------------------------- Bloc réutilisable : caisse d'un pompiste ------------------------
    Utilisé à la fois par le pompiste lui-même (Ma Caisse) et par le gérant, pour chaque
    pompiste de sa station (onglet Pompistes). La caisse du pompiste ne dépend que de SA
-   pompe : volumes vendus (au prix du jour fixé côté Ventes) − ses décaissements − ses bons. */
+   pompe : volumes vendus (au prix du jour fixé côté Ventes) − ses versements − ses bons. */
 function PompisteCaisseBlock({ db, setDb, profile, stationId, pompeId, date, devise, canEdit = true }) {
-  const c = computeCaissePompiste(db.releves, db.ventes, db.decaissements, db.bonsPompe, stationId, pompeId, date);
+  const c = computeCaissePompiste(db.releves, db.ventes, db.versementsPompiste, db.bonsPompe, stationId, pompeId, date);
 
-  const [libD, setLibD] = useState("");
-  const [montD, setMontD] = useState("");
+  const [libV, setLibV] = useState("");
+  const [montV, setMontV] = useState("");
   const [libB, setLibB] = useState("");
   const [qteB, setQteB] = useState("");
   const [puB, setPuB] = useState("");
   const [frB, setFrB] = useState("");
   const [err, setErr] = useState("");
 
-  const addDecaissement = () => {
+  const addVersementPompiste = () => {
     setErr("");
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    if (!montD || num(montD) <= 0) { setErr("Indiquez un montant de décaissement valide."); return; }
-    const row = { id: uid(), stationId, pompeId, date, libelle: libD.trim(), montant: montD };
-    let next = { ...db, decaissements: [...db.decaissements, row] };
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "decaissement", action: "création", after: { date, libelle: row.libelle, montant: montD } });
+    if (!montV || num(montV) <= 0) { setErr("Indiquez un montant de versement valide."); return; }
+    const row = { id: uid(), stationId, pompeId, date, libelle: libV.trim(), montant: montV };
+    let next = { ...db, versementsPompiste: [...db.versementsPompiste, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "versementPompiste", action: "création", after: { date, libelle: row.libelle, montant: montV } });
     setDb(next);
-    setLibD(""); setMontD("");
+    setLibV(""); setMontV("");
   };
-  const removeDecaissement = (row) => {
-    let next = { ...db, decaissements: db.decaissements.filter((d) => d.id !== row.id) };
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "decaissement", action: "suppression", before: { date: row.date, libelle: row.libelle, montant: row.montant } });
+  const removeVersementPompiste = (row) => {
+    let next = { ...db, versementsPompiste: db.versementsPompiste.filter((d) => d.id !== row.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "versementPompiste", action: "suppression", before: { date: row.date, libelle: row.libelle, montant: row.montant } });
     setDb(next);
   };
 
@@ -1453,37 +1463,37 @@ function PompisteCaisseBlock({ db, setDb, profile, stationId, pompeId, date, dev
         </div>
       </div>
       <p className="text-xs text-center" style={{ color: C.textFaint }}>
-        Caisse = valeur des volumes vendus ({fmtMontant(c.montantVente, devise)}) − décaissements ({fmtMontant(c.totalDecaissement, devise)}) − bons ({fmtMontant(c.totalBon, devise)})
+        Caisse = valeur des volumes vendus ({fmtMontant(c.montantVente, devise)}) − versements ({fmtMontant(c.totalVersementPompiste, devise)}) − bons ({fmtMontant(c.totalBon, devise)})
       </p>
 
       <div className="grid sm:grid-cols-2 gap-4">
         <Card>
-          <p className="text-sm font-semibold mb-2 flex items-center gap-1.5"><Banknote size={15} /> Décaissements</p>
+          <p className="text-sm font-semibold mb-2 flex items-center gap-1.5"><Banknote size={15} /> Versements pompiste</p>
           {canEdit && (
             <div className="flex flex-col gap-2 mb-3">
-              <input className="smi-input rounded-md px-2.5 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé (ex : achat fournitures)" value={libD} onChange={(e) => setLibD(e.target.value)} />
+              <input className="smi-input rounded-md px-2.5 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé (ex : remise au gérant)" value={libV} onChange={(e) => setLibV(e.target.value)} />
               <div className="flex gap-2">
-                <input className="smi-input rounded-md px-2.5 py-1.5 text-xs flex-1" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder={`Montant (${devise})`} value={montD} onChange={(e) => setMontD(e.target.value)} />
-                <Button onClick={addDecaissement}><Plus size={14} /></Button>
+                <input className="smi-input rounded-md px-2.5 py-1.5 text-xs flex-1" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder={`Montant (${devise})`} value={montV} onChange={(e) => setMontV(e.target.value)} />
+                <Button onClick={addVersementPompiste}><Plus size={14} /></Button>
               </div>
             </div>
           )}
-          {c.decaissements.length === 0 ? (
-            <p className="text-xs" style={{ color: C.textFaint }}>Aucun décaissement ce jour.</p>
+          {c.versementsPompiste.length === 0 ? (
+            <p className="text-xs" style={{ color: C.textFaint }}>Aucun versement ce jour.</p>
           ) : (
             <div className="flex flex-col gap-1.5">
-              {c.decaissements.map((d) => (
+              {c.versementsPompiste.map((d) => (
                 <div key={d.id} className="flex items-center justify-between rounded-md px-2.5 py-1.5" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                   <span className="text-xs" style={{ color: C.textMuted }}>{d.libelle || "—"}</span>
                   <div className="flex items-center gap-2">
                     <span className="smi-mono text-xs font-semibold">{fmtMontant(d.montant, devise)}</span>
-                    {canEdit && <button onClick={() => removeDecaissement(d)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={12} /></button>}
+                    {canEdit && <button onClick={() => removeVersementPompiste(d)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={12} /></button>}
                   </div>
                 </div>
               ))}
             </div>
           )}
-          <p className="text-xs text-right mt-2 font-semibold" style={{ color: C.textMuted }}>Total : <span className="smi-mono">{fmtMontant(c.totalDecaissement, devise)}</span></p>
+          <p className="text-xs text-right mt-2 font-semibold" style={{ color: C.textMuted }}>Total : <span className="smi-mono">{fmtMontant(c.totalVersementPompiste, devise)}</span></p>
         </Card>
 
         <Card>
@@ -1558,6 +1568,7 @@ function PompistesView({ db, setDb, profile }) {
   const stationId = profile.stationId;
   const [form, setForm] = useState(null);
   const [pinInput, setPinInput] = useState("");
+  const [formErr, setFormErr] = useState("");
   const [date, setDate] = useState(todayISO());
   const [openId, setOpenId] = useState(null);
   const station = db.stations.find((s) => s.id === stationId);
@@ -1566,8 +1577,19 @@ function PompistesView({ db, setDb, profile }) {
   const stationPompistes = db.pompistes.filter((p) => p.stationId === stationId);
 
   const save = () => {
+    setFormErr("");
     if (!form.nom?.trim() || !form.pompeId) return;
     const before = form.id ? db.pompistes.find((p) => p.id === form.id) : null;
+    // Chaque pompiste doit avoir son propre code PIN — c'est ce qui protège sa caisse
+    // quand plusieurs personnes se relaient sur la même pompe (rotation par équipes).
+    if (!pinInput.trim() && !before?.pinHash) {
+      setFormErr("Chaque pompiste doit avoir un code PIN personnel (au moins 4 chiffres).");
+      return;
+    }
+    if (pinInput.trim() && pinInput.trim().length < 4) {
+      setFormErr("Le code PIN doit contenir au moins 4 chiffres.");
+      return;
+    }
     const record = { ...form, stationId, nom: form.nom.trim() };
     if (pinInput.trim()) record.pinHash = hashPin(pinInput.trim());
     if (!record.id) record.id = uid();
@@ -1581,7 +1603,7 @@ function PompistesView({ db, setDb, profile }) {
 
   const remove = (id) => {
     const p = db.pompistes.find((x) => x.id === id);
-    if (!confirm(`Supprimer ${p?.nom} de la liste des pompistes ? Ses relevés, décaissements et bons passés restent conservés.`)) return;
+    if (!confirm(`Supprimer ${p?.nom} de la liste des pompistes ? Ses relevés, versements et bons passés restent conservés.`)) return;
     let next = { ...db, pompistes: db.pompistes.filter((x) => x.id !== id) };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "pompiste", action: "suppression", before: { nom: p?.nom } });
     setDb(next);
@@ -1592,9 +1614,9 @@ function PompistesView({ db, setDb, profile }) {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="smi-display text-2xl flex items-center gap-2"><Users size={22} /> Pompistes</h2>
-          <p className="text-sm" style={{ color: C.textMuted }}>Un pompiste par pompe. Chacun voit et alimente uniquement la caisse de sa propre pompe.</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>Plusieurs pompistes peuvent se relayer sur une même pompe : renommez un pompiste existant (icône crayon) si une personne remplace durablement une autre, ou créez-en un second sur la même pompe pour un roulement d'équipes. Chacun n'alimente que la caisse de sa propre pompe et doit avoir son propre code PIN.</p>
         </div>
-        <Button onClick={() => setForm({ pompeId: stationPompes[0]?.id || "" })} disabled={stationPompes.length === 0}><Plus size={16} /> Nouveau pompiste</Button>
+        <Button onClick={() => { setForm({ pompeId: stationPompes[0]?.id || "" }); setPinInput(""); setFormErr(""); }} disabled={stationPompes.length === 0}><Plus size={16} /> Nouveau pompiste</Button>
       </div>
 
       {stationPompes.length === 0 && <EmptyState icon={Gauge} title="Aucune pompe sur votre station" hint="Demandez à un administrateur de créer les pompes de votre station." />}
@@ -1604,13 +1626,14 @@ function PompistesView({ db, setDb, profile }) {
           <div className="grid sm:grid-cols-2 gap-3">
             <Field label="Nom du pompiste"><TextInput value={form.nom || ""} onChange={(e) => setForm({ ...form, nom: e.target.value })} placeholder="Ex. Ibrahima Bah" /></Field>
             <Field label="Pompe gérée"><PompeSelect pompes={stationPompes} stationId={stationId} value={form.pompeId} onChange={(v) => setForm({ ...form, pompeId: v })} /></Field>
-            <Field label={form.pinHash ? "Changer le code PIN (optionnel)" : "Code PIN (optionnel)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver." : "Demandé au pompiste à la connexion s'il est défini."}>
+            <Field label={form.pinHash ? "Changer le code PIN" : "Code PIN (obligatoire)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver, ou tapez-en un nouveau pour le remplacer." : "Au moins 4 chiffres — demandé au pompiste à chaque connexion."}>
               <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pinInput} onChange={(e) => setPinInput(e.target.value)} placeholder="••••" />
             </Field>
           </div>
+          {formErr && <p className="text-xs mt-2 flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={13} /> {formErr}</p>}
           <div className="flex gap-2 mt-4">
             <Button onClick={save}><CheckCircle2 size={16} /> Enregistrer</Button>
-            <Button variant="ghost" onClick={() => { setForm(null); setPinInput(""); }}><X size={16} /> Annuler</Button>
+            <Button variant="ghost" onClick={() => { setForm(null); setPinInput(""); setFormErr(""); }}><X size={16} /> Annuler</Button>
           </div>
         </Card>
       )}
@@ -1626,7 +1649,7 @@ function PompistesView({ db, setDb, profile }) {
           <div className="flex flex-col gap-3">
             {stationPompistes.map((p) => {
               const pompe = db.pompes.find((x) => x.id === p.pompeId);
-              const c = computeCaissePompiste(db.releves, db.ventes, db.decaissements, db.bonsPompe, stationId, p.pompeId, date);
+              const c = computeCaissePompiste(db.releves, db.ventes, db.versementsPompiste, db.bonsPompe, stationId, p.pompeId, date);
               const open = openId === p.id;
               return (
                 <Card key={p.id}>
@@ -1637,7 +1660,7 @@ function PompistesView({ db, setDb, profile }) {
                     </div>
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" onClick={() => setOpenId(open ? null : p.id)}>{open ? "Réduire" : "Détails"} <ChevronDown size={14} style={{ transform: open ? "rotate(180deg)" : "none" }} /></Button>
-                      <Button variant="ghost" onClick={() => setForm(p)}><Pencil size={13} /></Button>
+                      <Button variant="ghost" onClick={() => { setForm(p); setPinInput(""); setFormErr(""); }}><Pencil size={13} /></Button>
                       <Button variant="danger" onClick={() => remove(p.id)}><Trash2 size={13} /></Button>
                     </div>
                   </div>
@@ -1960,15 +1983,37 @@ function DashboardView({ db }) {
     const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, s.id, lastCaisseDate) : null;
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate };
+    // Totaux du mois côté Caisse du gérant — c'est cette caisse-là, tenue par le gérant,
+    // qui remonte à l'administrateur ; distincte des versements/bons individuels de
+    // chaque pompiste (onglet Pompistes, réservé au gérant).
+    const caisseDatesThisMonth = [...new Set(db.caisses.filter((c) => c.stationId === s.id && c.date.startsWith(monthPrefix)).map((c) => c.date))];
+    let totalBonGerant = 0, totalVersementBancaireGerant = 0, totalPaiementMarchandGerant = 0, totalAutreVersementGerant = 0;
+    caisseDatesThisMonth.forEach((d) => {
+      const c = computeCaisse(db.releves, db.ventes, db.caisses, s.id, d);
+      totalBonGerant += c.totalBon;
+      totalVersementBancaireGerant += c.totalVersementBancaire;
+      totalPaiementMarchandGerant += c.totalPaiementMarchand;
+      totalAutreVersementGerant += c.totalAutreVersement;
+    });
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalBonGerant, totalVersementBancaireGerant, totalPaiementMarchandGerant, totalAutreVersementGerant };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, monthPrefix]);
 
   const totalCA = rows.reduce((a, r) => a + r.ca, 0);
   const totalVol = rows.reduce((a, r) => a + r.vEssence + r.vGasoil, 0);
+  const totalVersementBancaireReseau = rows.reduce((a, r) => a + r.totalVersementBancaireGerant, 0);
+  const totalBonsReseau = rows.reduce((a, r) => a + r.totalBonGerant, 0);
+  const totalPaiementMarchandReseau = rows.reduce((a, r) => a + r.totalPaiementMarchandGerant, 0);
+  const totalAutreVersementReseau = rows.reduce((a, r) => a + r.totalAutreVersementGerant, 0);
   // Un réseau peut mélanger des stations en devises différentes : le total ne peut alors
   // pas être affiché comme un simple montant unique sans induire en erreur.
   const devises = new Set(db.stations.map((s) => s.devise || "GNF"));
-  const totalCADisplay = devises.size <= 1 ? fmtMontant(totalCA, [...devises][0] || "GNF") : `${totalCA.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
+  const monoDevise = devises.size <= 1;
+  const uniqueDevise = [...devises][0] || "GNF";
+  const totalCADisplay = monoDevise ? fmtMontant(totalCA, uniqueDevise) : `${totalCA.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
+  const totalVersementBancaireDisplay = monoDevise ? fmtMontant(totalVersementBancaireReseau, uniqueDevise) : `${totalVersementBancaireReseau.toLocaleString("fr-FR")} (multi-devises)`;
+  const totalBonsDisplay = monoDevise ? fmtMontant(totalBonsReseau, uniqueDevise) : `${totalBonsReseau.toLocaleString("fr-FR")} (multi-devises)`;
+  const totalPaiementMarchandDisplay = monoDevise ? fmtMontant(totalPaiementMarchandReseau, uniqueDevise) : `${totalPaiementMarchandReseau.toLocaleString("fr-FR")} (multi-devises)`;
+  const totalAutreVersementDisplay = monoDevise ? fmtMontant(totalAutreVersementReseau, uniqueDevise) : `${totalAutreVersementReseau.toLocaleString("fr-FR")} (multi-devises)`;
 
   return (
     <div className="flex flex-col gap-4">
@@ -1977,9 +2022,13 @@ function DashboardView({ db }) {
         <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}) — mise à jour automatique à chaque saisie.</p>
       </div>
 
-      <div className="grid sm:grid-cols-2 gap-3">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Volume réseau (mois)</p><div className="mt-1"><GaugeNumber value={fmtVol(totalVol)} size="lg" tone="teal" /></div></Card>
         <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Chiffre d'affaires réseau (mois)</p><div className="mt-1"><GaugeNumber value={totalCADisplay} size="lg" tone="amber" /></div></Card>
+        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total bon (mois)</p><div className="mt-1"><GaugeNumber value={totalBonsDisplay} size="lg" /></div></Card>
+        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total versement bancaire (mois)</p><div className="mt-1"><GaugeNumber value={totalVersementBancaireDisplay} size="lg" /></div></Card>
+        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total paiement marchand (mois)</p><div className="mt-1"><GaugeNumber value={totalPaiementMarchandDisplay} size="lg" /></div></Card>
+        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total autre versement (mois)</p><div className="mt-1"><GaugeNumber value={totalAutreVersementDisplay} size="lg" /></div></Card>
       </div>
 
       {db.stations.length === 0 ? (
@@ -1999,6 +2048,12 @@ function DashboardView({ db }) {
                 <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (mois)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
               </div>
               <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (mois)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
+              <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Total bon (mois)</p><GaugeNumber value={fmtMontant(r.totalBonGerant, devise)} /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Total versement bancaire (mois)</p><GaugeNumber value={fmtMontant(r.totalVersementBancaireGerant, devise)} /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Total paiement marchand (mois)</p><GaugeNumber value={fmtMontant(r.totalPaiementMarchandGerant, devise)} /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Total autre versement (mois)</p><GaugeNumber value={fmtMontant(r.totalAutreVersementGerant, devise)} /></div>
+              </div>
               <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
                 <div>
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
@@ -2571,11 +2626,11 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "ma_caisse", title: "Ma Caisse", roles: ["pompiste"],
-    text: "Votre caisse du jour = valeur des volumes vendus à votre pompe (au prix fixé par le gérant) − vos décaissements − vos bons. Saisissez d'abord votre relevé du jour, puis ajoutez ici vos décaissements (dépenses en espèces) et vos bons (carburant non payé en espèces) : la caisse attendue se recalcule automatiquement.",
+    text: "Votre caisse du jour = valeur des volumes vendus à votre pompe (au prix fixé par le gérant) − vos versements − vos bons. Saisissez d'abord votre relevé du jour, puis ajoutez ici vos versements (argent que vous remettez en cours de journée) et vos bons (carburant non payé en espèces) : la caisse attendue se recalcule automatiquement.",
   },
   {
     key: "pompistes", title: "Pompistes", roles: ["gerant"],
-    text: "Créez un pompiste par pompe de votre station (nom + PIN optionnel). Pour chaque pompiste, consultez le détail de sa caisse du jour (ou d'une date passée) : volumes vendus, décaissements, bons, et caisse attendue. Vous pouvez aussi ajouter ou corriger des lignes de décaissement/bon à sa place si besoin.",
+    text: "Créez un pompiste par personne (nom + PIN obligatoire, au moins 4 chiffres) et associez-le à une pompe. En cas de roulement d'équipes sur la même pompe, renommez un pompiste existant ou créez-en un second sur cette pompe. Pour chaque pompiste, consultez le détail de sa caisse du jour (ou d'une date passée) : volumes vendus, versements, bons, et caisse attendue. Vous pouvez aussi ajouter ou corriger des lignes de versement/bon à sa place si besoin. Attention : la caisse d'une pompe pour une date donnée cumule tout ce qui a été saisi ce jour-là sur cette pompe, quel que soit le pompiste connecté.",
   },
   {
     key: "ventes", title: "Ventes", roles: ["admin", "gerant"],
@@ -2683,7 +2738,7 @@ function GuideView({ profile }) {
 
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", pompiste: "Pompiste", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", decaissement: "Décaissement", bonPompe: "Bon pompiste", inspection: "Inspection", reception: "Réception" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", pompiste: "Pompiste", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", versementPompiste: "Versement pompiste", bonPompe: "Bon pompiste", inspection: "Inspection", reception: "Réception" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
