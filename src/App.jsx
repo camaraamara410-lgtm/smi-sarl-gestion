@@ -204,6 +204,9 @@ function sumVersements(versements) {
 function sumVersementsBancaires(versements) {
   return (versements || []).reduce((a, v) => a + num(v.versementBancaire), 0);
 }
+function sumCodeMarchand(versements) {
+  return (versements || []).reduce((a, v) => a + num(v.codeMarchand), 0);
+}
 function sumAutresVersements(versements) {
   return (versements || []).reduce((a, v) => a + num(v.autreVersement), 0);
 }
@@ -215,13 +218,14 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
   // Rétro-compatibilité : les anciennes saisies avaient un total unique (totalBon/
   // totalVersement) au lieu de lignes détaillées — on ne recalcule depuis les lignes
   // que si elles existent, sinon on retombe sur l'ancien total simple. Le détail
-  // bancaire/autre n'existe que depuis les lignes ; les anciennes saisies sans lignes
-  // n'ont pas cette ventilation et remontent 0 sur ces deux sous-totaux.
+  // bancaire/code marchand/autre n'existe que depuis les lignes ; les anciennes saisies
+  // sans lignes n'ont pas cette ventilation et remontent 0 sur ces trois sous-totaux.
   const bons = c.bons || [];
   const versements = c.versements || [];
   const totalBon = c.bons ? sumBons(bons) : num(c.totalBon);
   const totalVersement = c.versements ? sumVersements(versements) : num(c.totalVersement);
   const totalVersementBancaire = sumVersementsBancaires(versements);
+  const totalCodeMarchand = sumCodeMarchand(versements);
   const totalAutreVersement = sumAutresVersements(versements);
   const totalPaiementMarchand = num(c.totalPaiementMarchand);
   // Le versement (dépôt bancaire du jour) n'entre plus dans le calcul de la caisse
@@ -231,7 +235,7 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
   const caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
-  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalVersementBancaire, totalAutreVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
+  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalVersementBancaire, totalCodeMarchand, totalAutreVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
 }
 
 function sumVersementsPompiste(items) {
@@ -1428,7 +1432,10 @@ function SyntheseCaisseView({ db, profile }) {
     caisseDates.forEach((d) => {
       const c = computeCaisse(db.releves, db.ventes, db.caisses, s.id, d);
       totalBonMois += c.totalBon;
-      totalPaiementMarchandMois += c.totalPaiementMarchand;
+      // Le Code marchand saisi ligne par ligne dans le Coupon de Versement rejoint ici le
+      // Paiement marchand saisi en un seul champ dans la Caisse : les deux sont la même
+      // nature de flux (mobile money / code marchand) et se cumulent dans un seul total.
+      totalPaiementMarchandMois += c.totalPaiementMarchand + c.totalCodeMarchand;
       totalVersementBancaireMois += c.totalVersementBancaire;
       totalAutreVersementMois += c.totalAutreVersement;
     });
@@ -1507,6 +1514,7 @@ function SyntheseCaisseView({ db, profile }) {
                   <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                     <p className="text-xs" style={{ color: C.textFaint }}>− Total Paiement marchand</p>
                     <GaugeNumber value={fmtMontant(r.totalPaiementMarchandMois, devise)} />
+                    <p className="text-xs mt-1" style={{ color: C.textFaint }}>(inclut le Code marchand du Coupon de Versement)</p>
                   </div>
                   <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                     <p className="text-xs" style={{ color: C.textFaint }}>− Total Bon</p>
@@ -2753,7 +2761,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "synthese_caisse", title: "Synthèse Caisse", roles: ["admin", "gerant"],
-    text: "Le calcul général du mois, station par station, entièrement automatique — rien à saisir ici, tout vient de l'onglet Caisse. Formule : Caisse d'ouverture (caisse précédente du premier jour du mois avec une caisse saisie) + CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand − Total Bon = caisse théorique. Un écart est signalé en rouge s'il dépasse 1 unité par rapport au dernier comptage physique réel saisi dans le mois.",
+    text: "Le calcul général du mois, station par station, entièrement automatique — rien à saisir ici, tout vient de l'onglet Caisse. Le Code marchand saisi ligne par ligne dans le Coupon de Versement est cumulé avec le Paiement marchand (même nature de flux) ; le Versement bancaire et l'Autre versement restent chacun dans leur propre total. Formule : Caisse d'ouverture (caisse précédente du premier jour du mois avec une caisse saisie) + CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand − Total Bon = caisse théorique. Un écart est signalé en rouge s'il dépasse 1 unité par rapport au dernier comptage physique réel saisi dans le mois.",
   },
   {
     key: "inspection", title: "Inspection", roles: ["admin", "gerant"],
