@@ -1402,9 +1402,13 @@ function CaisseView({ db, setDb, profile }) {
 
 /* ------------------------------ Synthèse Caisse (mensuelle) ------------------------------
    Calcul général, par station, entièrement automatique : alimenté par ce que le gérant
-   saisit déjà dans l'onglet Caisse (aucune saisie propre à cet onglet). Formule :
-   CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand
-   − Total Bon = caisse théorique, comparée au dernier comptage physique réel du mois. */
+   saisit déjà dans l'onglet Caisse (aucune saisie propre à cet onglet).
+   IMPORTANT : la « Caisse attendue » affichée ici est calculée par exactement la même
+   fonction (computeCaisse) que celle utilisée dans l'onglet Caisse, le Rapport journalier
+   et le Tableau de bord — elle leur est donc toujours identique par construction, pour la
+   même station et la même date. Les cumuls du mois (CA, Bon, Paiement marchand, Versement
+   bancaire, Autre versement) sont affichés séparément, à titre d'information seulement :
+   ils ne servent pas à recalculer une caisse différente. */
 function SyntheseCaisseView({ db, profile }) {
   const isGerant = profile.role === "gerant";
   const now = new Date();
@@ -1426,7 +1430,9 @@ function SyntheseCaisseView({ db, profile }) {
     if (caisseDates.length === 0) {
       return { station: s, caMois, hasCaisse: false };
     }
-    const first = computeCaisse(db.releves, db.ventes, db.caisses, s.id, caisseDates[0]);
+    // La caisse attendue vient d'un seul appel à computeCaisse, pour la dernière date du
+    // mois qui a une caisse saisie — exactement le même calcul que partout ailleurs dans
+    // l'app pour cette station et cette date, jamais reconstruit à la main.
     const last = computeCaisse(db.releves, db.ventes, db.caisses, s.id, caisseDates[caisseDates.length - 1]);
     let totalBonMois = 0, totalPaiementMarchandMois = 0, totalVersementBancaireMois = 0, totalAutreVersementMois = 0;
     caisseDates.forEach((d) => {
@@ -1439,14 +1445,12 @@ function SyntheseCaisseView({ db, profile }) {
       totalVersementBancaireMois += c.totalVersementBancaire;
       totalAutreVersementMois += c.totalAutreVersement;
     });
-    const caisseOuverture = first.caissePrecedente;
-    const caisseTheorique = caisseOuverture + caMois - totalVersementBancaireMois - totalAutreVersementMois - totalPaiementMarchandMois - totalBonMois;
-    const ecart = last.caisseDuJour === null ? null : last.caisseDuJour - caisseTheorique;
     return {
       station: s, caMois, hasCaisse: true,
-      premiereDate: caisseDates[0], derniereDate: caisseDates[caisseDates.length - 1],
-      caisseOuverture, totalBonMois, totalPaiementMarchandMois, totalVersementBancaireMois, totalAutreVersementMois,
-      caisseTheorique, dernierComptage: last.caisseDuJour, ecart,
+      derniereDate: caisseDates[caisseDates.length - 1],
+      totalBonMois, totalPaiementMarchandMois, totalVersementBancaireMois, totalAutreVersementMois,
+      caissePrecedente: last.caissePrecedente, caDuJourCaisse: last.ca,
+      caisseAttendue: last.caisseAttendue, dernierComptage: last.caisseDuJour, ecart: last.ecart,
     };
   }), [stationsToShow, db.releves, db.ventes, db.caisses, prefix]);
 
@@ -1454,7 +1458,7 @@ function SyntheseCaisseView({ db, profile }) {
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl flex items-center gap-2"><Calculator size={22} /> Synthèse Caisse</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Calcul automatique du mois, station par station, à partir de ce qui est déjà saisi dans l'onglet Caisse — rien à remplir ici.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Calcul automatique, station par station, à partir de ce qui est déjà saisi dans l'onglet Caisse — rien à remplir ici. La Caisse attendue est toujours identique à celle du Rapport journalier et du Tableau de bord, pour la même date.</p>
       </div>
 
       <Card>
@@ -1490,47 +1494,40 @@ function SyntheseCaisseView({ db, profile }) {
                   <Pill tone="amber">{devise}</Pill>
                 </div>
 
-                <div className="grid sm:grid-cols-2 gap-3 mb-4">
-                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-                    <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Caisse d'ouverture ({fmtDateLong(r.premiereDate)})</p>
-                    <GaugeNumber value={fmtMontant(r.caisseOuverture, devise)} />
-                  </div>
-                  <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
-                    <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.teal }}>Chiffre d'affaires du mois</p>
-                    <GaugeNumber value={fmtMontant(r.caMois, devise)} tone="teal" />
-                  </div>
+                <div className="rounded-md p-3 mb-4" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+                  <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Caisse attendue au {fmtDateLong(r.derniereDate)}</p>
+                  <GaugeNumber value={fmtMontant(r.caisseAttendue, devise)} tone="amber" size="lg" />
+                  <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>= Caisse précédente ({fmtMontant(r.caissePrecedente, devise)}) + CA du jour ({fmtMontant(r.caDuJourCaisse, devise)}) − Bon du jour − Paiement marchand du jour — identique au Rapport journalier et au Tableau de bord pour cette date.</p>
                 </div>
 
-                <p className="text-xs font-semibold mb-2" style={{ color: C.textMuted }}>Déductions du mois</p>
-                <div className="grid sm:grid-cols-2 gap-3 mb-4">
-                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Versement bancaire</p>
-                    <GaugeNumber value={fmtMontant(r.totalVersementBancaireMois, devise)} />
+                <div className="rounded-md p-3" style={{ background: r.ecart !== null && Math.abs(r.ecart) > 1 ? C.dangerSoft : C.panelAlt, border: `1px solid ${r.ecart !== null && Math.abs(r.ecart) > 1 ? C.danger : C.border}`, marginBottom: "1rem" }}>
+                  <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Écart vs. comptage physique ({fmtDateLong(r.derniereDate)})</p>
+                  <GaugeNumber value={r.dernierComptage === null ? "Comptage non saisi ce jour-là" : fmtMontant(r.ecart, devise)} tone={r.ecart !== null && Math.abs(r.ecart) > 1 ? "danger" : "muted"} />
+                </div>
+
+                <p className="text-xs font-semibold mb-2" style={{ color: C.textMuted }}>Cumuls du mois ({monthLabel(month)} {year}) — information seulement, n'entrent pas dans le calcul de la caisse attendue ci-dessus</p>
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+                    <p className="text-xs" style={{ color: C.teal }}>Chiffre d'affaires du mois</p>
+                    <GaugeNumber value={fmtMontant(r.caMois, devise)} tone="teal" />
                   </div>
                   <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Autre versement</p>
-                    <GaugeNumber value={fmtMontant(r.totalAutreVersementMois, devise)} />
+                    <p className="text-xs" style={{ color: C.textFaint }}>Total Bon (mois)</p>
+                    <GaugeNumber value={fmtMontant(r.totalBonMois, devise)} />
                   </div>
                   <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Paiement marchand</p>
+                    <p className="text-xs" style={{ color: C.textFaint }}>Total Paiement marchand (mois)</p>
                     <GaugeNumber value={fmtMontant(r.totalPaiementMarchandMois, devise)} />
                     <p className="text-xs mt-1" style={{ color: C.textFaint }}>(inclut le Code marchand du Coupon de Versement)</p>
                   </div>
                   <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Bon</p>
-                    <GaugeNumber value={fmtMontant(r.totalBonMois, devise)} />
+                    <p className="text-xs" style={{ color: C.textFaint }}>Total Versement bancaire (mois)</p>
+                    <GaugeNumber value={fmtMontant(r.totalVersementBancaireMois, devise)} />
                   </div>
-                </div>
-
-                <div className="rounded-md p-3 mb-4" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
-                  <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Caisse théorique (dernière caisse)</p>
-                  <GaugeNumber value={fmtMontant(r.caisseTheorique, devise)} tone="amber" size="lg" />
-                  <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>= Caisse d'ouverture + CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand − Total Bon</p>
-                </div>
-
-                <div className="rounded-md p-3" style={{ background: r.ecart !== null && Math.abs(r.ecart) > 1 ? C.dangerSoft : C.panelAlt, border: `1px solid ${r.ecart !== null && Math.abs(r.ecart) > 1 ? C.danger : C.border}` }}>
-                  <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Écart vs. dernier comptage physique ({fmtDateLong(r.derniereDate)})</p>
-                  <GaugeNumber value={r.dernierComptage === null ? "Comptage non saisi ce jour-là" : fmtMontant(r.ecart, devise)} tone={r.ecart !== null && Math.abs(r.ecart) > 1 ? "danger" : "muted"} />
+                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>Total Autre versement (mois)</p>
+                    <GaugeNumber value={fmtMontant(r.totalAutreVersementMois, devise)} />
+                  </div>
                 </div>
               </Card>
             );
@@ -2761,7 +2758,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "synthese_caisse", title: "Synthèse Caisse", roles: ["admin", "gerant"],
-    text: "Le calcul général du mois, station par station, entièrement automatique — rien à saisir ici, tout vient de l'onglet Caisse. Le Code marchand saisi ligne par ligne dans le Coupon de Versement est cumulé avec le Paiement marchand (même nature de flux) ; le Versement bancaire et l'Autre versement restent chacun dans leur propre total. Formule : Caisse d'ouverture (caisse précédente du premier jour du mois avec une caisse saisie) + CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand − Total Bon = caisse théorique. Un écart est signalé en rouge s'il dépasse 1 unité par rapport au dernier comptage physique réel saisi dans le mois.",
+    text: "Rien à saisir ici — tout vient de l'onglet Caisse. La « Caisse attendue » affichée est calculée par exactement le même calcul que le Rapport journalier et le Tableau de bord : elle leur est donc toujours identique pour la même station et la même date, jamais recalculée différemment. Les cumuls du mois (CA, Bon, Paiement marchand — qui inclut le Code marchand du Coupon de Versement —, Versement bancaire, Autre versement) sont affichés séparément à titre d'information ; ils ne réduisent pas la caisse attendue. Un écart est signalé en rouge s'il dépasse 1 unité par rapport au dernier comptage physique réel du mois.",
   },
   {
     key: "inspection", title: "Inspection", roles: ["admin", "gerant"],
