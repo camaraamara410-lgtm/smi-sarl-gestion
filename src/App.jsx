@@ -4,7 +4,7 @@ import {
   Building2, Settings2, LogOut, Plus, Trash2, Pencil, AlertTriangle,
   CheckCircle2, X, Loader2, ChevronRight, MapPin, Droplet, Lock, Download, History,
   ClipboardCheck, Printer, ChevronDown, Truck, Camera, BookOpen,
-  Users, Banknote, Ticket
+  Users, Banknote, Ticket, Calculator
 } from "lucide-react";
 import { storage, isStorageDegraded, hasLocalStorage } from "./storage.js";
 
@@ -1396,6 +1396,143 @@ function CaisseView({ db, setDb, profile }) {
   );
 }
 
+/* ------------------------------ Synthèse Caisse (mensuelle) ------------------------------
+   Calcul général, par station, entièrement automatique : alimenté par ce que le gérant
+   saisit déjà dans l'onglet Caisse (aucune saisie propre à cet onglet). Formule :
+   CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand
+   − Total Bon = caisse théorique, comparée au dernier comptage physique réel du mois. */
+function SyntheseCaisseView({ db, profile }) {
+  const isGerant = profile.role === "gerant";
+  const now = new Date();
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : "");
+  const [month, setMonth] = useState(now.getMonth());
+  const [year, setYear] = useState(now.getFullYear());
+
+  const stationsToShow = isGerant
+    ? db.stations.filter((s) => s.id === profile.stationId)
+    : stationId ? db.stations.filter((s) => s.id === stationId) : db.stations;
+  const prefix = `${year}-${String(month + 1).padStart(2, "0")}`;
+
+  const results = useMemo(() => stationsToShow.map((s) => {
+    const releveDates = [...new Set(db.releves.filter((r) => r.stationId === s.id && r.date.startsWith(prefix)).map((r) => r.date))];
+    let caMois = 0;
+    releveDates.forEach((d) => { caMois += computeVente(db.releves, db.ventes, s.id, d).ca; });
+
+    const caisseDates = [...new Set(db.caisses.filter((c) => c.stationId === s.id && c.date.startsWith(prefix)).map((c) => c.date))].sort();
+    if (caisseDates.length === 0) {
+      return { station: s, caMois, hasCaisse: false };
+    }
+    const first = computeCaisse(db.releves, db.ventes, db.caisses, s.id, caisseDates[0]);
+    const last = computeCaisse(db.releves, db.ventes, db.caisses, s.id, caisseDates[caisseDates.length - 1]);
+    let totalBonMois = 0, totalPaiementMarchandMois = 0, totalVersementBancaireMois = 0, totalAutreVersementMois = 0;
+    caisseDates.forEach((d) => {
+      const c = computeCaisse(db.releves, db.ventes, db.caisses, s.id, d);
+      totalBonMois += c.totalBon;
+      totalPaiementMarchandMois += c.totalPaiementMarchand;
+      totalVersementBancaireMois += c.totalVersementBancaire;
+      totalAutreVersementMois += c.totalAutreVersement;
+    });
+    const caisseOuverture = first.caissePrecedente;
+    const caisseTheorique = caisseOuverture + caMois - totalVersementBancaireMois - totalAutreVersementMois - totalPaiementMarchandMois - totalBonMois;
+    const ecart = last.caisseDuJour === null ? null : last.caisseDuJour - caisseTheorique;
+    return {
+      station: s, caMois, hasCaisse: true,
+      premiereDate: caisseDates[0], derniereDate: caisseDates[caisseDates.length - 1],
+      caisseOuverture, totalBonMois, totalPaiementMarchandMois, totalVersementBancaireMois, totalAutreVersementMois,
+      caisseTheorique, dernierComptage: last.caisseDuJour, ecart,
+    };
+  }), [stationsToShow, db.releves, db.ventes, db.caisses, prefix]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl flex items-center gap-2"><Calculator size={22} /> Synthèse Caisse</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Calcul automatique du mois, station par station, à partir de ce qui est déjà saisi dans l'onglet Caisse — rien à remplir ici.</p>
+      </div>
+
+      <Card>
+        <div className="grid sm:grid-cols-3 gap-3">
+          {!isGerant && <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} allowAll /></Field>}
+          <Field label="Mois">
+            <SelectInput value={month} onChange={(e) => setMonth(Number(e.target.value))}>
+              {Array.from({ length: 12 }).map((_, i) => <option key={i} value={i}>{monthLabel(i)}</option>)}
+            </SelectInput>
+          </Field>
+          <Field label="Année"><NumberInput value={year} onChange={(e) => setYear(Number(e.target.value) || now.getFullYear())} /></Field>
+        </div>
+      </Card>
+
+      {results.length === 0 ? (
+        <EmptyState icon={Calculator} title="Aucune station" hint="Ajoutez une station pour voir sa synthèse caisse." />
+      ) : (
+        <div className="flex flex-col gap-4">
+          {results.map((r) => {
+            const devise = r.station.devise || "GNF";
+            if (!r.hasCaisse) {
+              return (
+                <Card key={r.station.id}>
+                  <p className="font-semibold mb-1">{r.station.nom}</p>
+                  <p className="text-xs" style={{ color: C.textFaint }}>Aucune caisse enregistrée pour {monthLabel(month)} {year} — rien à calculer.</p>
+                </Card>
+              );
+            }
+            return (
+              <Card key={r.station.id}>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="font-semibold">{r.station.nom}</p>
+                  <Pill tone="amber">{devise}</Pill>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Caisse d'ouverture ({fmtDateLong(r.premiereDate)})</p>
+                    <GaugeNumber value={fmtMontant(r.caisseOuverture, devise)} />
+                  </div>
+                  <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+                    <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.teal }}>Chiffre d'affaires du mois</p>
+                    <GaugeNumber value={fmtMontant(r.caMois, devise)} tone="teal" />
+                  </div>
+                </div>
+
+                <p className="text-xs font-semibold mb-2" style={{ color: C.textMuted }}>Déductions du mois</p>
+                <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Versement bancaire</p>
+                    <GaugeNumber value={fmtMontant(r.totalVersementBancaireMois, devise)} />
+                  </div>
+                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Autre versement</p>
+                    <GaugeNumber value={fmtMontant(r.totalAutreVersementMois, devise)} />
+                  </div>
+                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Paiement marchand</p>
+                    <GaugeNumber value={fmtMontant(r.totalPaiementMarchandMois, devise)} />
+                  </div>
+                  <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>− Total Bon</p>
+                    <GaugeNumber value={fmtMontant(r.totalBonMois, devise)} />
+                  </div>
+                </div>
+
+                <div className="rounded-md p-3 mb-4" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+                  <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Caisse théorique (dernière caisse)</p>
+                  <GaugeNumber value={fmtMontant(r.caisseTheorique, devise)} tone="amber" size="lg" />
+                  <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>= Caisse d'ouverture + CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand − Total Bon</p>
+                </div>
+
+                <div className="rounded-md p-3" style={{ background: r.ecart !== null && Math.abs(r.ecart) > 1 ? C.dangerSoft : C.panelAlt, border: `1px solid ${r.ecart !== null && Math.abs(r.ecart) > 1 ? C.danger : C.border}` }}>
+                  <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Écart vs. dernier comptage physique ({fmtDateLong(r.derniereDate)})</p>
+                  <GaugeNumber value={r.dernierComptage === null ? "Comptage non saisi ce jour-là" : fmtMontant(r.ecart, devise)} tone={r.ecart !== null && Math.abs(r.ecart) > 1 ? "danger" : "muted"} />
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------- Bloc réutilisable : caisse d'un pompiste ------------------------
    Utilisé à la fois par le pompiste lui-même (Ma Caisse) et par le gérant, pour chaque
    pompiste de sa station (onglet Pompistes). La caisse du pompiste ne dépend que de SA
@@ -1983,37 +2120,17 @@ function DashboardView({ db }) {
     const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, s.id, lastCaisseDate) : null;
-    // Totaux du mois côté Caisse du gérant — c'est cette caisse-là, tenue par le gérant,
-    // qui remonte à l'administrateur ; distincte des versements/bons individuels de
-    // chaque pompiste (onglet Pompistes, réservé au gérant).
-    const caisseDatesThisMonth = [...new Set(db.caisses.filter((c) => c.stationId === s.id && c.date.startsWith(monthPrefix)).map((c) => c.date))];
-    let totalBonGerant = 0, totalVersementBancaireGerant = 0, totalPaiementMarchandGerant = 0, totalAutreVersementGerant = 0;
-    caisseDatesThisMonth.forEach((d) => {
-      const c = computeCaisse(db.releves, db.ventes, db.caisses, s.id, d);
-      totalBonGerant += c.totalBon;
-      totalVersementBancaireGerant += c.totalVersementBancaire;
-      totalPaiementMarchandGerant += c.totalPaiementMarchand;
-      totalAutreVersementGerant += c.totalAutreVersement;
-    });
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalBonGerant, totalVersementBancaireGerant, totalPaiementMarchandGerant, totalAutreVersementGerant };
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, monthPrefix]);
 
   const totalCA = rows.reduce((a, r) => a + r.ca, 0);
   const totalVol = rows.reduce((a, r) => a + r.vEssence + r.vGasoil, 0);
-  const totalVersementBancaireReseau = rows.reduce((a, r) => a + r.totalVersementBancaireGerant, 0);
-  const totalBonsReseau = rows.reduce((a, r) => a + r.totalBonGerant, 0);
-  const totalPaiementMarchandReseau = rows.reduce((a, r) => a + r.totalPaiementMarchandGerant, 0);
-  const totalAutreVersementReseau = rows.reduce((a, r) => a + r.totalAutreVersementGerant, 0);
   // Un réseau peut mélanger des stations en devises différentes : le total ne peut alors
   // pas être affiché comme un simple montant unique sans induire en erreur.
   const devises = new Set(db.stations.map((s) => s.devise || "GNF"));
   const monoDevise = devises.size <= 1;
   const uniqueDevise = [...devises][0] || "GNF";
   const totalCADisplay = monoDevise ? fmtMontant(totalCA, uniqueDevise) : `${totalCA.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
-  const totalVersementBancaireDisplay = monoDevise ? fmtMontant(totalVersementBancaireReseau, uniqueDevise) : `${totalVersementBancaireReseau.toLocaleString("fr-FR")} (multi-devises)`;
-  const totalBonsDisplay = monoDevise ? fmtMontant(totalBonsReseau, uniqueDevise) : `${totalBonsReseau.toLocaleString("fr-FR")} (multi-devises)`;
-  const totalPaiementMarchandDisplay = monoDevise ? fmtMontant(totalPaiementMarchandReseau, uniqueDevise) : `${totalPaiementMarchandReseau.toLocaleString("fr-FR")} (multi-devises)`;
-  const totalAutreVersementDisplay = monoDevise ? fmtMontant(totalAutreVersementReseau, uniqueDevise) : `${totalAutreVersementReseau.toLocaleString("fr-FR")} (multi-devises)`;
 
   return (
     <div className="flex flex-col gap-4">
@@ -2022,13 +2139,9 @@ function DashboardView({ db }) {
         <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}) — mise à jour automatique à chaque saisie.</p>
       </div>
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid sm:grid-cols-2 gap-3">
         <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Volume réseau (mois)</p><div className="mt-1"><GaugeNumber value={fmtVol(totalVol)} size="lg" tone="teal" /></div></Card>
         <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Chiffre d'affaires réseau (mois)</p><div className="mt-1"><GaugeNumber value={totalCADisplay} size="lg" tone="amber" /></div></Card>
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total bon (mois)</p><div className="mt-1"><GaugeNumber value={totalBonsDisplay} size="lg" /></div></Card>
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total versement bancaire (mois)</p><div className="mt-1"><GaugeNumber value={totalVersementBancaireDisplay} size="lg" /></div></Card>
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total paiement marchand (mois)</p><div className="mt-1"><GaugeNumber value={totalPaiementMarchandDisplay} size="lg" /></div></Card>
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Total autre versement (mois)</p><div className="mt-1"><GaugeNumber value={totalAutreVersementDisplay} size="lg" /></div></Card>
       </div>
 
       {db.stations.length === 0 ? (
@@ -2048,12 +2161,6 @@ function DashboardView({ db }) {
                 <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (mois)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
               </div>
               <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (mois)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
-              <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Total bon (mois)</p><GaugeNumber value={fmtMontant(r.totalBonGerant, devise)} /></div>
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Total versement bancaire (mois)</p><GaugeNumber value={fmtMontant(r.totalVersementBancaireGerant, devise)} /></div>
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Total paiement marchand (mois)</p><GaugeNumber value={fmtMontant(r.totalPaiementMarchandGerant, devise)} /></div>
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Total autre versement (mois)</p><GaugeNumber value={fmtMontant(r.totalAutreVersementGerant, devise)} /></div>
-              </div>
               <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
                 <div>
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
@@ -2645,6 +2752,10 @@ const GUIDE_SECTIONS = [
     text: "« Caisse précédente » se saisit manuellement chaque jour (mettez 0 si tout l'argent a été versé la veille). « Caisse du jour » se pré-remplit avec le CA du jour, à corriger selon le comptage réel. Ajoutez une ligne dans « Coupon de Bon » pour chaque bon (carburant non payé en espèces) et dans « Coupon de Versement » pour chaque dépôt bancaire ou paiement par code marchand. Le Versement ne réduit pas la caisse attendue (il documente juste où est allé l'argent déjà compté) ; seuls le Bon et le Paiement marchand la réduisent réellement. Cette caisse est celle de la station dans son ensemble, distincte de la caisse individuelle de chaque pompiste.",
   },
   {
+    key: "synthese_caisse", title: "Synthèse Caisse", roles: ["admin", "gerant"],
+    text: "Le calcul général du mois, station par station, entièrement automatique — rien à saisir ici, tout vient de l'onglet Caisse. Formule : Caisse d'ouverture (caisse précédente du premier jour du mois avec une caisse saisie) + CA du mois − Total Versement bancaire − Total Autre versement − Total Paiement marchand − Total Bon = caisse théorique. Un écart est signalé en rouge s'il dépasse 1 unité par rapport au dernier comptage physique réel saisi dans le mois.",
+  },
+  {
     key: "inspection", title: "Inspection", roles: ["admin", "gerant"],
     text: "Grille de contrôle standard (propreté, sécurité incendie, état des pompes, hygiène, EPI, maintenance, éclairage...). Pour chaque point : Conforme, Non conforme (avec remarque), ou N/A si le point ne s'applique pas à cette station ce jour-là. L'historique des inspections passées reste consultable en dessous.",
   },
@@ -2807,6 +2918,7 @@ const TABS = [
   { key: "ventes", label: "Ventes", icon: Wallet, roles: ["admin", "gerant"] },
   { key: "stock", label: "Contrôle Stock", icon: Warehouse, roles: ["admin", "gerant"] },
   { key: "caisse", label: "Caisse", icon: Wallet, roles: ["admin", "gerant"] },
+  { key: "synthese_caisse", label: "Synthèse Caisse", icon: Calculator, roles: ["admin", "gerant"] },
   { key: "inspection", label: "Inspection", icon: ClipboardCheck, roles: ["admin", "gerant"] },
   { key: "reception", label: "Réception", icon: Truck, roles: ["admin", "gerant"] },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, roles: ["admin"] },
@@ -2854,6 +2966,7 @@ export default function App() {
       case "ventes": return <VentesView db={db} setDb={setDb} profile={profile} />;
       case "stock": return <StockView db={db} setDb={setDb} profile={profile} />;
       case "caisse": return <CaisseView db={db} setDb={setDb} profile={profile} />;
+      case "synthese_caisse": return <SyntheseCaisseView db={db} profile={profile} />;
       case "inspection": return <InspectionView db={db} setDb={setDb} profile={profile} />;
       case "reception": return <ReceptionView db={db} setDb={setDb} profile={profile} />;
       case "rapport": return <RapportMensuelView db={db} />;
