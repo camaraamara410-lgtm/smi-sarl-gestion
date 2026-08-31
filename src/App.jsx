@@ -100,6 +100,7 @@ function resizeImage(file, maxWidth = 700, quality = 0.6) {
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const versementTotal = (v) => num(v.banqueMontant) + num(v.paiementMarchandMontant) + num(v.autreMontant);
+const bonTotal = (b) => num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute);
 // fmtMontant accepte une devise explicite (celle de la station concernée) ; fmtGNF reste
 // disponible comme raccourci pour les rares affichages sans contexte de station.
 const fmtMontant = (v, devise = "GNF") => `${Math.round(num(v)).toLocaleString("fr-FR")} ${devise}`;
@@ -198,11 +199,18 @@ function computeMouvementPompiste(releves, ventes, mouvements, stationId, pompeI
   const prixGasoil = v ? num(v.prixGasoil) : 0;
   const valeurVente = vol.essence * prixEssence + vol.gasoil * prixGasoil;
   const m = mouvements.find((x) => x.stationId === stationId && x.pompeId === pompeId && x.date === date) || {};
-  const decaissementEspece = num(m.decaissementEspece);
-  const decaissementMobile = num(m.decaissementMobile);
-  const bon = num(m.bon);
-  const saCaisse = valeurVente - decaissementEspece - decaissementMobile - bon;
-  return { record: m.id ? m : null, vol, prixEssence, prixGasoil, valeurVente, decaissementEspece, decaissementMobile, bon, saCaisse };
+  // Rétro-compatibilité : les anciennes saisies avaient un montant unique par type
+  // (decaissementEspece/decaissementMobile/bon) au lieu de lignes détaillées.
+  const decaissements = m.decaissements || [
+    ...(num(m.decaissementEspece) ? [{ id: "legacy-e", type: "espece", montant: m.decaissementEspece }] : []),
+    ...(num(m.decaissementMobile) ? [{ id: "legacy-m", type: "mobile", montant: m.decaissementMobile }] : []),
+  ];
+  const bons = m.bons || (num(m.bon) ? [{ id: "legacy-b", montant: m.bon, libelle: "Bon (ancienne saisie)" }] : []);
+  const decaissementEspece = decaissements.filter((d) => d.type === "espece").reduce((a, d) => a + num(d.montant), 0);
+  const decaissementMobile = decaissements.filter((d) => d.type === "mobile").reduce((a, d) => a + num(d.montant), 0);
+  const totalBon = bons.reduce((a, b) => a + num(b.montant), 0);
+  const saCaisse = valeurVente - decaissementEspece - decaissementMobile - totalBon;
+  return { record: m.id ? m : null, vol, prixEssence, prixGasoil, valeurVente, decaissements, bons, decaissementEspece, decaissementMobile, totalBon, saCaisse };
 }
 
 function computeStock(releves, stocks, stationId, date) {
@@ -228,17 +236,23 @@ function sumVersements(versements) {
   return (versements || []).reduce((a, v) => a + num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement), 0);
 }
 
-function computeCaisse(releves, ventes, caisses, stationId, date) {
+function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stationId, date) {
   const c = findCaisse(caisses, stationId, date) || {};
   const ca = computeVente(releves, ventes, stationId, date).ca;
   const caissePrecedente = num(c.caissePrecedente);
-  // Rétro-compatibilité : les anciennes saisies avaient un total unique (totalBon/
-  // totalVersement) au lieu de lignes détaillées — on ne recalcule depuis les lignes
-  // que si elles existent, sinon on retombe sur l'ancien total simple.
-  const bons = c.bons || [];
-  const versements = c.versements || [];
-  const totalBon = c.bons ? sumBons(bons) : num(c.totalBon);
-  const totalVersement = c.versements ? sumVersements(versements) : num(c.totalVersement);
+
+  // Source unique : les Bons et Versements du jour viennent désormais des onglets dédiés
+  // Bons / Versement, pas d'une saisie séparée dans Caisse — évite toute confusion ou
+  // double-saisie sur le terrain. Repli sur l'ancienne saisie embarquée dans Caisse
+  // uniquement pour les dates saisies avant la création de ces onglets.
+  const bonsDuJour = (bonsColl || []).filter((b) => b.stationId === stationId && b.date === date);
+  const versementsDuJour = (versementsColl || []).filter((v) => v.stationId === stationId && v.date === date);
+
+  const bons = bonsDuJour.length > 0 ? bonsDuJour : (c.bons || []);
+  const versements = versementsDuJour.length > 0 ? versementsDuJour : (c.versements || []);
+  const totalBon = bonsDuJour.length > 0 ? bonsDuJour.reduce((a, b) => a + bonTotal(b), 0) : (c.bons ? sumBons(bons) : num(c.totalBon));
+  const totalVersement = versementsDuJour.length > 0 ? versementsDuJour.reduce((a, v) => a + versementTotal(v), 0) : (c.versements ? sumVersements(versements) : num(c.totalVersement));
+
   const totalPaiementMarchand = num(c.totalPaiementMarchand);
   // Le versement (dépôt bancaire du jour) n'entre plus dans le calcul de la caisse
   // attendue : il ne fait que documenter où est allée une partie de la caisse déjà
@@ -254,8 +268,8 @@ function computeCaisse(releves, ventes, caisses, stationId, date) {
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -488,6 +502,24 @@ function Pill({ children, tone = "muted" }) {
   );
 }
 
+// Visionneuse plein écran pour les photos (bon de livraison, reçu de versement...) — clic
+// sur une vignette pour voir la photo en grand, clic n'importe où (ou sur la croix) pour
+// fermer.
+function ImageLightbox({ src, onClose }) {
+  if (!src) return null;
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+    >
+      <button onClick={onClose} className="smi-btn" style={{ position: "absolute", top: 16, right: 16, color: "#fff" }} aria-label="Fermer">
+        <X size={28} />
+      </button>
+      <img src={src} alt="" style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 8 }} onClick={(e) => e.stopPropagation()} />
+    </div>
+  );
+}
+
 function EmptyState({ icon: Icon, title, hint }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
@@ -546,15 +578,22 @@ function RoleGate({ db, onSet }) {
   const stationHasPin = !!station?.pinHash;
   const isFirstAdmin = role === "admin" && adminPinHash === null;
 
-  const canSubmit = !busy && adminPinHash !== undefined && name.trim().length > 0
-    && (role === "admin" ? true : role === "pompiste" ? !!stationId && !!pompeId : !!stationId);
+  const canSubmit = !busy && adminPinHash !== undefined
+    && (role === "pompiste" ? (name.trim().length > 0 && pin.trim().length > 0) : (name.trim().length > 0 && (role === "admin" ? true : !!stationId)));
 
   const submit = async () => {
     setErr("");
-    if (!name.trim()) { setErr("Indiquez votre nom : il apparaîtra dans le journal des saisies."); return; }
-    if (role === "pompiste" && !pompeId) { setErr("Choisissez la pompe que vous gérez."); return; }
+    if (!name.trim()) { setErr(role === "pompiste" ? "Indiquez votre nom d'utilisateur." : "Indiquez votre nom : il apparaîtra dans le journal des saisies."); return; }
     setBusy(true);
     try {
+      if (role === "pompiste") {
+        if (!pin.trim()) { setErr("Indiquez votre mot de passe."); setBusy(false); return; }
+        const h = hashPin(pin.trim());
+        const acct = db.pompistes.find((p) => p.nom.trim().toLowerCase() === name.trim().toLowerCase() && p.passwordHash === h);
+        if (!acct) { setErr("Nom ou mot de passe incorrect."); setBusy(false); return; }
+        onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId, name: acct.nom });
+        return;
+      }
       if (role === "admin") {
         if (isFirstAdmin) {
           if (pin.trim().length < 4) { setErr("Choisissez un code PIN d'au moins 4 chiffres (première connexion admin)."); setBusy(false); return; }
@@ -623,23 +662,13 @@ function RoleGate({ db, onSet }) {
         )}
 
         {role === "pompiste" && (
-          <div className="flex flex-col gap-3 mb-4">
-            <Field label="Station affectée">
-              <StationSelect stations={db.stations} value={stationId} onChange={setStationId} />
-            </Field>
-            {db.stations.length === 0 && (
-              <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}>
-                <AlertTriangle size={13} /> Aucune station créée. Un administrateur doit d'abord en ajouter une.
-              </p>
-            )}
-            <Field label="Pompe que vous gérez">
-              <PompeSelect pompes={db.pompes} stationId={stationId} value={pompeId} onChange={setPompeId} />
-            </Field>
-          </div>
+          <p className="text-xs mb-3" style={{ color: C.textFaint }}>
+            Votre compte (pompe assignée) est créé par votre gérant depuis l'onglet Mouvements Pompiste. Entrez ci-dessous le nom et le mot de passe qu'il vous a communiqués.
+          </p>
         )}
 
-        <Field label="Votre nom" hint="Utilisé pour identifier vos saisies dans le journal.">
-          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={name} onChange={(e) => setName(e.target.value)} placeholder="ex : Mamadou Diallo" />
+        <Field label={role === "pompiste" ? "Nom d'utilisateur" : "Votre nom"} hint={role === "pompiste" ? undefined : "Utilisé pour identifier vos saisies dans le journal."}>
+          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={name} onChange={(e) => setName(e.target.value)} placeholder={role === "pompiste" ? "ex : Ibrahima Kaba" : "ex : Mamadou Diallo"} />
         </Field>
 
         {role === "admin" && (
@@ -648,13 +677,19 @@ function RoleGate({ db, onSet }) {
           </Field>
         )}
 
-        {(role === "gerant" || role === "pompiste") && stationHasPin && (
+        {role === "gerant" && stationHasPin && (
           <Field label="Code PIN de la station">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
           </Field>
         )}
-        {(role === "gerant" || role === "pompiste") && stationId && !stationHasPin && (
+        {role === "gerant" && stationId && !stationHasPin && (
           <p className="text-xs mb-2" style={{ color: C.textFaint }}>Aucun code PIN défini pour cette station — accès libre (un administrateur peut en définir un depuis Stations).</p>
+        )}
+
+        {role === "pompiste" && (
+          <Field label="Mot de passe">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
+          </Field>
         )}
 
         {err && (
@@ -1181,19 +1216,15 @@ function CaisseView({ db, setDb, profile }) {
   const isGerant = profile.role === "gerant";
   const [stationId, setStationId] = useState(profile.stationId || db.stations[0]?.id || "");
   const [date, setDate] = useState(todayISO());
-  const c = computeCaisse(db.releves, db.ventes, db.caisses, stationId, date);
+  const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, date);
 
   const [precedente, setPrecedente] = useState("");
   const [duJour, setDuJour] = useState("");
-  const [bons, setBons] = useState([]);
-  const [versements, setVersements] = useState([]);
   const [paiementMarchand, setPaiementMarchand] = useState("");
 
   useEffect(() => {
     if (c.record) {
       setPrecedente(c.record.caissePrecedente ?? ""); setDuJour(c.record.caisseDuJour ?? "");
-      setBons(c.record.bons || (c.record.totalBon ? [{ id: uid(), libelle: "Bon", quantite: "", prixUnitaire: "", fraisRoute: c.record.totalBon }] : []));
-      setVersements(c.record.versements || (c.record.totalVersement ? [{ id: uid(), libelle: "Versement", versementBancaire: c.record.totalVersement, codeMarchand: "", autreVersement: "" }] : []));
       setPaiementMarchand(c.record.totalPaiementMarchand ?? "");
     } else {
       // Saisie manuelle obligatoire : le jour où le gérant verse tout l'argent déclaré,
@@ -1203,20 +1234,12 @@ function CaisseView({ db, setDb, profile }) {
       // Pré-rempli avec le CA du jour (calculé depuis les ventes) — modifiable si le
       // comptage réel du gérant diffère.
       setDuJour(c.ca ? String(c.ca) : "");
-      setBons([]); setVersements([]); setPaiementMarchand("");
+      setPaiementMarchand("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
 
-  const addBon = () => setBons((p) => [...p, { id: uid(), libelle: "", quantite: "", prixUnitaire: "", fraisRoute: "" }]);
-  const updateBon = (id, field, val) => setBons((p) => p.map((b) => (b.id === id ? { ...b, [field]: val } : b)));
-  const removeBon = (id) => setBons((p) => p.filter((b) => b.id !== id));
-
-  const addVersement = () => setVersements((p) => [...p, { id: uid(), libelle: "", versementBancaire: "", codeMarchand: "", autreVersement: "" }]);
-  const updateVersement = (id, field, val) => setVersements((p) => p.map((v) => (v.id === id ? { ...v, [field]: val } : v)));
-  const removeVersement = (id) => setVersements((p) => p.filter((v) => v.id !== id));
-
-  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, bons, versements, totalPaiementMarchand: paiementMarchand }], stationId, date);
+  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalPaiementMarchand: paiementMarchand }], db.bons, db.versements, stationId, date);
   const [err, setErr] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
@@ -1226,7 +1249,7 @@ function CaisseView({ db, setDb, profile }) {
     const effStationId = isGerant ? profile.stationId : stationId;
     if (!effStationId) return;
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    const row = { id: c.record?.id || uid(), stationId: effStationId, date, caissePrecedente: precedente, caisseDuJour: duJour, bons, versements, totalPaiementMarchand: paiementMarchand };
+    const row = { id: c.record?.id || uid(), stationId: effStationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalPaiementMarchand: paiementMarchand };
     let next = { ...db, caisses: c.record ? db.caisses.map((x) => (x.id === c.record.id ? row : x)) : [...db.caisses, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "caisse", action: c.record ? "modification" : "création", before: c.record ? { caisseDuJour: c.record.caisseDuJour } : null, after: { date, caisseDuJour: duJour } });
     setDb(next);
@@ -1251,60 +1274,19 @@ function CaisseView({ db, setDb, profile }) {
           <Field label={`Paiement marchand (${devise})`} hint="Mobile money, carte, tout paiement non encaissé en espèces"><NumberInput value={paiementMarchand} onChange={(e) => setPaiementMarchand(e.target.value)} /></Field>
         </div>
 
-        {/* Coupon de Bon — lignes détaillées (libellé, quantité, prix unitaire, frais de route) */}
-        <div className="mt-5">
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-sm font-semibold">Coupon de Bon</p>
-            <Button variant="ghost" onClick={addBon}><Plus size={14} /> Ajouter une ligne</Button>
+        {/* Bons et Versements ne se saisissent plus ici — ils viennent automatiquement des
+            onglets dédiés Bons et Versement, pour éviter toute double saisie sur le terrain. */}
+        <div className="grid sm:grid-cols-2 gap-3 mt-5">
+          <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Total Bons du jour (auto)</p>
+            <GaugeNumber value={fmtMontant(live.totalBon, devise)} />
+            <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris automatiquement de l'onglet Bons.</p>
           </div>
-          {bons.length === 0 ? (
-            <p className="text-xs" style={{ color: C.textFaint }}>Aucune ligne de bon.</p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {bons.map((b) => {
-                const montant = num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute);
-                return (
-                  <div key={b.id} className="rounded-md p-2.5 grid gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, gridTemplateColumns: "1.4fr 0.8fr 0.9fr 0.9fr auto" }}>
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé (ex : Citerne BI 7077)" value={b.libelle} onChange={(e) => updateBon(b.id, "libelle", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Quantité (L)" value={b.quantite} onChange={(e) => updateBon(b.id, "quantite", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder={`Prix unit. (${devise})`} value={b.prixUnitaire} onChange={(e) => updateBon(b.id, "prixUnitaire", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Frais de route" value={b.fraisRoute} onChange={(e) => updateBon(b.id, "fraisRoute", e.target.value)} />
-                    <button onClick={() => removeBon(b.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
-                    <p className="text-xs col-span-5 text-right" style={{ color: C.textFaint }}>Montant : <span className="smi-mono">{fmtMontant(montant, devise)}</span></p>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <p className="text-xs text-right mt-1.5 font-semibold" style={{ color: C.textMuted }}>Total Bons : <span className="smi-mono">{fmtMontant(live.totalBon, devise)}</span></p>
-        </div>
-
-        {/* Coupon de Versement — lignes détaillées (versement bancaire / code marchand / autre) */}
-        <div className="mt-5">
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-sm font-semibold">Coupon de Versement</p>
-            <Button variant="ghost" onClick={addVersement}><Plus size={14} /> Ajouter une ligne</Button>
+          <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Total Versements du jour (auto, info)</p>
+            <GaugeNumber value={fmtMontant(live.totalVersement, devise)} />
+            <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris automatiquement de l'onglet Versement.</p>
           </div>
-          {versements.length === 0 ? (
-            <p className="text-xs" style={{ color: C.textFaint }}>Aucune ligne de versement.</p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {versements.map((v) => {
-                const montant = num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement);
-                return (
-                  <div key={v.id} className="rounded-md p-2.5 grid gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, gridTemplateColumns: "1.2fr 0.9fr 0.9fr 0.9fr auto" }}>
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé" value={v.libelle} onChange={(e) => updateVersement(v.id, "libelle", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Versement bancaire" value={v.versementBancaire} onChange={(e) => updateVersement(v.id, "versementBancaire", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Code marchand" value={v.codeMarchand} onChange={(e) => updateVersement(v.id, "codeMarchand", e.target.value)} />
-                    <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder="Autre versement" value={v.autreVersement} onChange={(e) => updateVersement(v.id, "autreVersement", e.target.value)} />
-                    <button onClick={() => removeVersement(v.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
-                    <p className="text-xs col-span-5 text-right" style={{ color: C.textFaint }}>Montant : <span className="smi-mono">{fmtMontant(montant, devise)}</span></p>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <p className="text-xs text-right mt-1.5 font-semibold" style={{ color: C.textMuted }}>Total Versements : <span className="smi-mono">{fmtMontant(live.totalVersement, devise)}</span></p>
         </div>
 
         <div className="grid sm:grid-cols-3 gap-3 mt-5">
@@ -1339,32 +1321,45 @@ function CaisseView({ db, setDb, profile }) {
 
 function MouvementsPompisteView({ db, setDb, profile }) {
   const isPompiste = profile.role === "pompiste";
+  const isGerant = profile.role === "gerant";
   const [stationId, setStationId] = useState(profile.stationId || db.stations[0]?.id || "");
   const [pompeId, setPompeId] = useState(isPompiste ? profile.pompeId : "");
   const [date, setDate] = useState(todayISO());
   const [pompisteName, setPompisteName] = useState(isPompiste ? profile.name : "");
   const m = computeMouvementPompiste(db.releves, db.ventes, db.mouvements, stationId, pompeId, date);
-  const [decaissementEspece, setDecaissementEspece] = useState("");
-  const [decaissementMobile, setDecaissementMobile] = useState("");
-  const [bon, setBon] = useState("");
+  const [decaissements, setDecaissements] = useState([]);
+  const [bons, setBons] = useState([]);
   const [err, setErr] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
 
+  // Gestion des comptes pompistes (créés par le gérant uniquement)
+  const [acctPompeId, setAcctPompeId] = useState("");
+  const [acctNom, setAcctNom] = useState("");
+  const [acctPassword, setAcctPassword] = useState("");
+  const [acctErr, setAcctErr] = useState("");
+
   useEffect(() => {
     if (m.record) {
-      setDecaissementEspece(m.record.decaissementEspece ?? "");
-      setDecaissementMobile(m.record.decaissementMobile ?? "");
-      setBon(m.record.bon ?? "");
+      setDecaissements(m.decaissements || []);
+      setBons(m.bons || []);
       setPompisteName(m.record.pompisteName ?? (isPompiste ? profile.name : ""));
     } else {
-      setDecaissementEspece(""); setDecaissementMobile(""); setBon("");
+      setDecaissements([]); setBons([]);
       if (isPompiste) setPompisteName(profile.name);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, pompeId, date]);
 
-  const live = computeMouvementPompiste(db.releves, db.ventes, [...db.mouvements.filter((x) => x.id !== m.record?.id), { stationId, pompeId, date, decaissementEspece, decaissementMobile, bon }], stationId, pompeId, date);
+  const addDecaissement = (type) => setDecaissements((p) => [...p, { id: uid(), type, montant: "" }]);
+  const updateDecaissement = (id, montant) => setDecaissements((p) => p.map((d) => (d.id === id ? { ...d, montant } : d)));
+  const removeDecaissement = (id) => setDecaissements((p) => p.filter((d) => d.id !== id));
+
+  const addBonLine = () => setBons((p) => [...p, { id: uid(), montant: "", libelle: "" }]);
+  const updateBonLine = (id, field, val) => setBons((p) => p.map((b) => (b.id === id ? { ...b, [field]: val } : b)));
+  const removeBonLine = (id) => setBons((p) => p.filter((b) => b.id !== id));
+
+  const live = computeMouvementPompiste(db.releves, db.ventes, [...db.mouvements.filter((x) => x.id !== m.record?.id), { stationId, pompeId, date, decaissements, bons }], stationId, pompeId, date);
 
   const save = () => {
     setErr("");
@@ -1373,13 +1368,34 @@ function MouvementsPompisteView({ db, setDb, profile }) {
     if (!effStationId || !effPompeId) { setErr("Choisissez une station et une pompe."); return; }
     if (!pompisteName.trim()) { setErr("Indiquez le nom du pompiste."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    const row = { id: m.record?.id || uid(), stationId: effStationId, pompeId: effPompeId, date, pompisteName: pompisteName.trim(), decaissementEspece, decaissementMobile, bon };
+    if (bons.some((b) => num(b.montant) > 0 && !b.libelle?.trim())) { setErr("Chaque bon doit avoir un libellé."); return; }
+    const row = { id: m.record?.id || uid(), stationId: effStationId, pompeId: effPompeId, date, pompisteName: pompisteName.trim(), decaissements, bons };
     let next = { ...db, mouvements: m.record ? db.mouvements.map((x) => (x.id === m.record.id ? row : x)) : [...db.mouvements, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "mouvement", action: m.record ? "modification" : "création", after: { date, pompisteName: row.pompisteName, saCaisse: computeMouvementPompiste(db.releves, db.ventes, [...db.mouvements.filter((x) => x.id !== m.record?.id), row], effStationId, effPompeId, date).saCaisse } });
     setDb(next);
   };
 
+  const createAccount = () => {
+    setAcctErr("");
+    if (!acctPompeId) { setAcctErr("Choisissez une pompe."); return; }
+    if (!acctNom.trim()) { setAcctErr("Indiquez le nom du pompiste."); return; }
+    if (acctPassword.trim().length < 4) { setAcctErr("Le mot de passe doit faire au moins 4 caractères."); return; }
+    const row = { id: uid(), stationId: profile.stationId, pompeId: acctPompeId, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
+    let next = { ...db, pompistes: [...(db.pompistes || []), row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: profile.stationId, entity: "pompiste_compte", action: "création", after: { nom: row.nom, pompe: db.pompes.find((p) => p.id === acctPompeId)?.nom } });
+    setDb(next);
+    setAcctPompeId(""); setAcctNom(""); setAcctPassword("");
+  };
+
+  const removeAccount = (acct) => {
+    if (!confirm(`Supprimer le compte de ${acct.nom} ?`)) return;
+    let next = { ...db, pompistes: db.pompistes.filter((p) => p.id !== acct.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acct.stationId, entity: "pompiste_compte", action: "suppression", before: { nom: acct.nom } });
+    setDb(next);
+  };
+
   const pompe = db.pompes.find((p) => p.id === (isPompiste ? profile.pompeId : pompeId));
+  const stationAccounts = isGerant ? (db.pompistes || []).filter((p) => p.stationId === profile.stationId) : [];
 
   const history = db.mouvements
     .filter((x) => (isPompiste ? x.pompeId === profile.pompeId : (!stationId || x.stationId === stationId)))
@@ -1391,6 +1407,34 @@ function MouvementsPompisteView({ db, setDb, profile }) {
         <h2 className="smi-display text-2xl">Mouvements Pompiste</h2>
         <p className="text-sm" style={{ color: C.textMuted }}>Caisse individuelle d'un pompiste, calculée à partir des ventes de sa pompe.</p>
       </div>
+
+      {isGerant && (
+        <Card className="max-w-md">
+          <p className="font-semibold text-sm mb-3">Comptes pompistes de ma station</p>
+          <div className="grid sm:grid-cols-2 gap-3 mb-3">
+            <Field label="Pompe"><PompeSelect pompes={db.pompes} stationId={profile.stationId} value={acctPompeId} onChange={setAcctPompeId} /></Field>
+            <Field label="Nom du pompiste">
+              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={acctNom} onChange={(e) => setAcctNom(e.target.value)} placeholder="ex : Ibrahima Kaba" />
+            </Field>
+          </div>
+          <Field label="Mot de passe (4 caractères minimum)">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={acctPassword} onChange={(e) => setAcctPassword(e.target.value)} placeholder="••••" />
+          </Field>
+          {acctErr && <p className="text-xs flex items-center gap-1.5 mt-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {acctErr}</p>}
+          <div className="flex justify-end mt-3"><Button onClick={createAccount}><Plus size={15} /> Créer le compte</Button></div>
+
+          {stationAccounts.length > 0 && (
+            <div className="flex flex-col gap-1.5 mt-4 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
+              {stationAccounts.map((acct) => (
+                <div key={acct.id} className="flex items-center justify-between text-xs">
+                  <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.pompes.find((p) => p.id === acct.pompeId)?.nom || "—"}</span></span>
+                  <button onClick={() => removeAccount(acct)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       <Card className="max-w-md">
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
@@ -1413,10 +1457,51 @@ function MouvementsPompisteView({ db, setDb, profile }) {
           <p className="text-xs mt-2" style={{ color: C.textFaint }}>Valeur de la vente : <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(live.valeurVente, devise)}</span></p>
         </div>
 
-        <div className="flex flex-col gap-3">
-          <Field label={`Décaissement espèce (${devise})`}><NumberInput value={decaissementEspece} onChange={(e) => setDecaissementEspece(e.target.value)} /></Field>
-          <Field label={`Décaissement mobile (${devise})`}><NumberInput value={decaissementMobile} onChange={(e) => setDecaissementMobile(e.target.value)} /></Field>
-          <Field label={`Bon (${devise})`}><NumberInput value={bon} onChange={(e) => setBon(e.target.value)} /></Field>
+        {/* Décaissements — plusieurs lignes possibles, le total se recalcule automatiquement */}
+        <div className="mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-semibold">Décaissements</p>
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => addDecaissement("espece")}><Plus size={14} /> Espèce</Button>
+              <Button variant="ghost" onClick={() => addDecaissement("mobile")}><Plus size={14} /> Mobile</Button>
+            </div>
+          </div>
+          {decaissements.length === 0 ? (
+            <p className="text-xs" style={{ color: C.textFaint }}>Aucun décaissement.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {decaissements.map((d) => (
+                <div key={d.id} className="rounded-md p-2 flex items-center gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                  <Pill tone={d.type === "espece" ? "amber" : "teal"}>{d.type === "espece" ? "Espèce" : "Mobile"}</Pill>
+                  <input className="smi-input flex-1 rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="number" placeholder={`Montant (${devise})`} value={d.montant} onChange={(e) => updateDecaissement(d.id, e.target.value)} />
+                  <button onClick={() => removeDecaissement(d.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-right mt-1.5" style={{ color: C.textFaint }}>Total espèce : <span className="smi-mono">{fmtMontant(live.decaissementEspece, devise)}</span> · Total mobile : <span className="smi-mono">{fmtMontant(live.decaissementMobile, devise)}</span></p>
+        </div>
+
+        {/* Bons — plusieurs lignes possibles, le total se recalcule automatiquement */}
+        <div className="mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-semibold">Bons</p>
+            <Button variant="ghost" onClick={addBonLine}><Plus size={14} /> Ajouter un bon</Button>
+          </div>
+          {bons.length === 0 ? (
+            <p className="text-xs" style={{ color: C.textFaint }}>Aucun bon.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {bons.map((b) => (
+                <div key={b.id} className="rounded-md p-2 flex items-center gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                  <input className="smi-input flex-1 rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} placeholder="Libellé" value={b.libelle} onChange={(e) => updateBonLine(b.id, "libelle", e.target.value)} />
+                  <input className="smi-input rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text, width: 120 }} type="number" placeholder={`Montant (${devise})`} value={b.montant} onChange={(e) => updateBonLine(b.id, "montant", e.target.value)} />
+                  <button onClick={() => removeBonLine(b.id)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-right mt-1.5" style={{ color: C.textFaint }}>Total bons : <span className="smi-mono">{fmtMontant(live.totalBon, devise)}</span></p>
         </div>
 
         <div className="rounded-md p-3 mt-4" style={{ background: Math.abs(live.saCaisse) < 1 ? "#1E3A24" : C.dangerSoft, border: `1px solid ${Math.abs(live.saCaisse) < 1 ? C.success : C.danger}` }}>
@@ -1482,8 +1567,10 @@ function VersementView({ db, setDb, profile }) {
   const [banquePhoto, setBanquePhoto] = useState(null);
   const [paiementMarchandMontant, setPaiementMarchandMontant] = useState("");
   const [autreMontant, setAutreMontant] = useState("");
+  const [autreLibelle, setAutreLibelle] = useState("");
   const [err, setErr] = useState("");
   const [expandedDate, setExpandedDate] = useState(null);
+  const [lightbox, setLightbox] = useState(null);
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
 
@@ -1502,7 +1589,7 @@ function VersementView({ db, setDb, profile }) {
 
   const reset = () => {
     setBanqueNom(""); setBanqueMontant(""); setBanquePhoto(null);
-    setPaiementMarchandMontant(""); setAutreMontant("");
+    setPaiementMarchandMontant(""); setAutreMontant(""); setAutreLibelle("");
   };
 
   const save = () => {
@@ -1511,7 +1598,7 @@ function VersementView({ db, setDb, profile }) {
     if (!effStationId) { setErr("Choisissez une station."); return; }
     if (total <= 0) { setErr("Indiquez au moins un montant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    const row = { id: uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, paiementMarchandMontant, autreMontant, timestamp: new Date().toISOString() };
+    const row = { id: uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, paiementMarchandMontant, autreMontant, autreLibelle, timestamp: new Date().toISOString() };
     let next = { ...db, versements: [...db.versements, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "versement", action: "création", after: { date, banqueNom, total } });
     setDb(next);
@@ -1575,7 +1662,7 @@ function VersementView({ db, setDb, profile }) {
               </label>
               {banquePhoto && (
                 <div className="mt-2">
-                  <img src={banquePhoto} alt="Reçu de versement" className="rounded-md" style={{ maxHeight: 140, border: `1px solid ${C.border}` }} />
+                  <img src={banquePhoto} alt="Reçu de versement" className="rounded-md cursor-pointer" style={{ maxHeight: 140, border: `1px solid ${C.border}` }} onClick={() => setLightbox(banquePhoto)} />
                 </div>
               )}
             </Field>
@@ -1585,6 +1672,9 @@ function VersementView({ db, setDb, profile }) {
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
           <Field label={`Paiement marchand (${devise})`}><NumberInput value={paiementMarchandMontant} onChange={(e) => setPaiementMarchandMontant(e.target.value)} /></Field>
           <Field label={`Autre versement (${devise})`}><NumberInput value={autreMontant} onChange={(e) => setAutreMontant(e.target.value)} /></Field>
+          <Field label="Libellé (autre versement)">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={autreLibelle} onChange={(e) => setAutreLibelle(e.target.value)} placeholder="ex : Remboursement caisse" />
+          </Field>
         </div>
 
         <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
@@ -1628,20 +1718,167 @@ function VersementView({ db, setDb, profile }) {
                         return (
                           <div key={v.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                             {v.banquePhoto ? (
-                              <img src={v.banquePhoto} alt="" className="rounded-md flex-shrink-0" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} />
+                              <img src={v.banquePhoto} alt="" className="rounded-md flex-shrink-0 cursor-pointer" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(v.banquePhoto)} />
                             ) : (
                               <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Landmark size={16} /></div>
                             )}
                             <div className="flex-1 min-w-0 text-xs flex flex-col gap-0.5" style={{ color: C.textMuted }}>
                               {num(v.banqueMontant) > 0 && <span>Bancaire{v.banqueNom ? ` (${v.banqueNom})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.banqueMontant, dv)}</span></span>}
                               {num(v.paiementMarchandMontant) > 0 && <span>Paiement marchand : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.paiementMarchandMontant, dv)}</span></span>}
-                              {num(v.autreMontant) > 0 && <span>Autre versement : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
+                              {num(v.autreMontant) > 0 && <span>Autre versement{v.autreLibelle ? ` (${v.autreLibelle})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
                             </div>
                             <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(vTotal, dv)}</span>
                             {!isGerant && <button onClick={() => removeVersement(v)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={13} /></button>}
                           </div>
                         );
                       })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+      <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
+    </div>
+  );
+}
+
+/* ----------------------------------- Bons view -------------------------------- */
+
+function BonsView({ db, setDb, profile }) {
+  const isGerant = profile.role === "gerant";
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
+  const [date, setDate] = useState(todayISO());
+  const [libelle, setLibelle] = useState("");
+  const [quantite, setQuantite] = useState("");
+  const [prixUnitaire, setPrixUnitaire] = useState("");
+  const [fraisRoute, setFraisRoute] = useState("");
+  const [err, setErr] = useState("");
+  const [expandedDate, setExpandedDate] = useState(null);
+  const station = db.stations.find((s) => s.id === stationId);
+  const devise = station?.devise || "GNF";
+
+  const total = num(quantite) * num(prixUnitaire) + num(fraisRoute);
+
+  const reset = () => {
+    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute("");
+  };
+
+  const save = () => {
+    setErr("");
+    const effStationId = isGerant ? profile.stationId : stationId;
+    if (!effStationId) { setErr("Choisissez une station."); return; }
+    if (!libelle.trim()) { setErr("Indiquez un libellé pour ce bon."); return; }
+    if (total <= 0) { setErr("Indiquez une quantité et un prix, ou des frais de route."); return; }
+    if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const row = { id: uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, timestamp: new Date().toISOString() };
+    let next = { ...db, bons: [...db.bons, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "bon", action: "création", after: { date, libelle: row.libelle, total } });
+    setDb(next);
+    reset();
+    setExpandedDate(date);
+  };
+
+  const removeBon = (b) => {
+    if (!confirm("Supprimer ce bon ?")) return;
+    let next = { ...db, bons: db.bons.filter((x) => x.id !== b.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: b.stationId, entity: "bon", action: "suppression", before: { date: b.date, libelle: b.libelle } });
+    setDb(next);
+  };
+
+  const history = db.bons
+    .filter((b) => (isGerant ? b.stationId === profile.stationId : (!stationId || b.stationId === stationId)))
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.timestamp || "").localeCompare(a.timestamp || "")));
+
+  // Un même jour peut cumuler plusieurs bons — regroupement par date avec cumul journalier,
+  // détail de chaque ligne disponible en dépliant.
+  const grouped = useMemo(() => {
+    const map = new Map();
+    history.forEach((b) => {
+      if (!map.has(b.date)) map.set(b.date, []);
+      map.get(b.date).push(b);
+    });
+    return Array.from(map.entries()).map(([d, entries]) => ({
+      date: d,
+      entries,
+      total: entries.reduce((a, e) => a + bonTotal(e), 0),
+      station: db.stations.find((s) => s.id === entries[0].stationId),
+    }));
+  }, [history, db.stations]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Bons</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des bons de carburant (non payés en espèces).</p>
+      </div>
+
+      <Card className="max-w-md">
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
+          <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <Field label="Libellé">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="ex : Citerne BI 7077" />
+          </Field>
+          <div className="grid sm:grid-cols-3 gap-3">
+            <Field label="Quantité (L)"><NumberInput value={quantite} onChange={(e) => setQuantite(e.target.value)} /></Field>
+            <Field label={`Prix unitaire (${devise})`}><NumberInput value={prixUnitaire} onChange={(e) => setPrixUnitaire(e.target.value)} /></Field>
+            <Field label={`Frais de route (${devise})`}><NumberInput value={fraisRoute} onChange={(e) => setFraisRoute(e.target.value)} /></Field>
+          </div>
+        </div>
+
+        <div className="rounded-md p-3 mt-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+          <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Total de cette saisie</p>
+          <GaugeNumber value={fmtMontant(total, devise)} tone="amber" size="lg" />
+          <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Le cumul du jour (si plusieurs bons) s'affiche dans l'historique ci-dessous.</p>
+        </div>
+
+        <div className="flex items-center justify-end gap-3 mt-4">
+          {err && <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+          <Button onClick={save}><CheckCircle2 size={16} /> Valider</Button>
+        </div>
+      </Card>
+
+      <Card>
+        <p className="font-semibold text-sm mb-3">Historique des bons</p>
+        {grouped.length === 0 ? (
+          <EmptyState icon={Wallet} title="Aucun bon enregistré" hint="Les bons enregistrés apparaîtront ici." />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {grouped.map((g) => {
+              const open = expandedDate === g.date;
+              const dv = g.station?.devise || "GNF";
+              return (
+                <div key={g.date} className="rounded-md" style={{ border: `1px solid ${C.border}` }}>
+                  <button onClick={() => setExpandedDate(open ? null : g.date)} className="smi-btn w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{fmtDateLong(g.date)}</span>
+                      <span className="text-xs" style={{ color: C.textFaint }}>{g.station?.nom || "—"}</span>
+                      {g.entries.length > 1 && <Pill tone="amber">{g.entries.length} bons</Pill>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold smi-mono" style={{ color: C.amber }}>{fmtMontant(g.total, dv)}</span>
+                      <ChevronDown size={16} style={{ transform: open ? "rotate(180deg)" : "none", color: C.textFaint }} />
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-3 pb-3 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+                      {g.entries.map((b) => (
+                        <div key={b.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                          <div className="flex-1 min-w-0 text-xs" style={{ color: C.textMuted }}>
+                            <span className="font-medium" style={{ color: C.text }}>{b.libelle}</span>
+                            {num(b.quantite) > 0 && <span> · {fmtVol(b.quantite)} × {fmtMontant(b.prixUnitaire, dv)}</span>}
+                            {num(b.fraisRoute) > 0 && <span> · Frais : {fmtMontant(b.fraisRoute, dv)}</span>}
+                          </div>
+                          <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(bonTotal(b), dv)}</span>
+                          {!isGerant && <button onClick={() => removeBon(b)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={13} /></button>}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -1664,6 +1901,7 @@ function ReceptionView({ db, setDb, profile }) {
   const [numeroBon, setNumeroBon] = useState("");
   const [photo, setPhoto] = useState(null);
   const [err, setErr] = useState("");
+  const [lightbox, setLightbox] = useState(null);
 
   const onPhotoChange = async (e) => {
     const file = e.target.files?.[0];
@@ -1739,7 +1977,7 @@ function ReceptionView({ db, setDb, profile }) {
             </label>
             {photo && (
               <div className="mt-2">
-                <img src={photo} alt="Bon de livraison" className="rounded-md" style={{ maxHeight: 140, border: `1px solid ${C.border}` }} />
+                <img src={photo} alt="Bon de livraison" className="rounded-md cursor-pointer" style={{ maxHeight: 140, border: `1px solid ${C.border}` }} onClick={() => setLightbox(photo)} />
               </div>
             )}
           </Field>
@@ -1761,7 +1999,7 @@ function ReceptionView({ db, setDb, profile }) {
             {history.map((r) => (
               <div key={r.id} className="rounded-md p-3 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                 {r.photo ? (
-                  <img src={r.photo} alt="" className="rounded-md flex-shrink-0" style={{ width: 48, height: 48, objectFit: "cover", border: `1px solid ${C.border}` }} />
+                  <img src={r.photo} alt="" className="rounded-md flex-shrink-0 cursor-pointer" style={{ width: 48, height: 48, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(r.photo)} />
                 ) : (
                   <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 48, height: 48, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Truck size={18} /></div>
                 )}
@@ -1775,6 +2013,7 @@ function ReceptionView({ db, setDb, profile }) {
           </div>
         )}
       </Card>
+      <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
 }
@@ -1953,7 +2192,7 @@ function DashboardView({ db }) {
     const lastStockDate = [...db.stocks].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
-    const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, s.id, lastCaisseDate) : null;
+    const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, lastCaisseDate) : null;
     const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
     return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, monthPrefix]);
@@ -2181,7 +2420,7 @@ function RapportJournalierView({ db, profile }) {
     const stockRec = db.stocks.find((x) => x.stationId === s.id && x.date === date);
     const stock = stockRec ? computeStock(db.releves, db.stocks, s.id, date) : null;
     const caisseRec = db.caisses.find((x) => x.stationId === s.id && x.date === date);
-    const caisse = caisseRec ? computeCaisse(db.releves, db.ventes, db.caisses, s.id, date) : null;
+    const caisse = caisseRec ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, date) : null;
     const inspections = db.inspections.filter((i) => i.stationId === s.id && i.date === date);
     return { station: s, v, stock, caisse, inspections };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.inspections, date]);
@@ -2212,7 +2451,7 @@ function RapportJournalierView({ db, profile }) {
 
   const vJour = stationId ? computeVente(db.releves, db.ventes, stationId, date) : null;
   const stockJour = stationId ? computeStock(db.releves, db.stocks, stationId, date) : null;
-  const caisseJour = stationId ? computeCaisse(db.releves, db.ventes, db.caisses, stationId, date) : null;
+  const caisseJour = stationId ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, date) : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -2438,7 +2677,7 @@ function RapportJournalierView({ db, profile }) {
                       <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                         <th className="text-left py-1" style={{ color: C.textMuted }}>Libellé</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Versement bancaire ({devise})</th>
-                        <th className="text-right py-1" style={{ color: C.textMuted }}>Code marchand ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Paiement marchand ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Autre versement ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
                       </tr>
@@ -2446,11 +2685,11 @@ function RapportJournalierView({ db, profile }) {
                     <tbody>
                       {caisseJour.versements.map((v) => (
                         <tr key={v.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                          <td className="py-1">{v.libelle || "—"}</td>
-                          <td className="py-1 text-right smi-mono">{fmtMontant(v.versementBancaire, devise)}</td>
-                          <td className="py-1 text-right smi-mono">{fmtMontant(v.codeMarchand, devise)}</td>
-                          <td className="py-1 text-right smi-mono">{fmtMontant(v.autreVersement, devise)}</td>
-                          <td className="py-1 text-right smi-mono">{fmtMontant(num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement), devise)}</td>
+                          <td className="py-1">{v.banqueNom || v.autreLibelle || "—"}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(v.banqueMontant, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(v.paiementMarchandMontant, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(v.autreMontant, devise)}</td>
+                          <td className="py-1 text-right smi-mono">{fmtMontant(versementTotal(v), devise)}</td>
                         </tr>
                       ))}
                       {caisseJour.versements.length === 0 && <tr><td colSpan={5} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
@@ -2566,7 +2805,7 @@ function SecuriteView({ profile }) {
 const GUIDE_SECTIONS = [
   {
     key: "mouvements", title: "Mouvements Pompiste", adminOnly: false,
-    text: "Réservé au gérant et aux pompistes. Pour la pompe gérée : le relevé du jour (volume vendu) s'affiche automatiquement, avec son prix pour calculer la valeur de la vente. Le pompiste (ou le gérant pour lui) saisit ses décaissements espèces, ses décaissements mobile money, et le total des bons. Sa caisse = valeur de la vente − décaissements − bons. Si le résultat est 0, il n'y a pas de manquant ; un résultat négatif signale un manquant à régulariser.",
+    text: "Réservé au gérant et aux pompistes. Le gérant y crée les comptes pompistes (pompe assignée, nom, mot de passe) — le pompiste se connecte ensuite avec ce nom et ce mot de passe. Pour la pompe gérée : le relevé du jour s'affiche automatiquement avec la valeur de la vente. Chaque décaissement (espèce ou mobile) et chaque bon ajouté recalcule automatiquement le total. Sa caisse = valeur de la vente − décaissements − bons. Si le résultat est 0, il n'y a pas de manquant ; un résultat négatif signale un manquant à régulariser.",
   },
   {
     key: "releve", title: "Relevé Pompes", adminOnly: false,
@@ -2582,7 +2821,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "caisse", title: "Caisse", adminOnly: false,
-    text: "« Caisse précédente » se saisit manuellement chaque jour (mettez 0 si tout l'argent a été versé la veille). « Caisse du jour » se pré-remplit avec le CA du jour, à corriger selon le comptage réel. Ajoutez une ligne dans « Coupon de Bon » pour chaque bon (carburant non payé en espèces) et dans « Coupon de Versement » pour chaque dépôt bancaire ou paiement par code marchand. Le Versement ne réduit pas la caisse attendue (il documente juste où est allé l'argent déjà compté) ; seuls le Bon et le Paiement marchand la réduisent réellement.",
+    text: "« Caisse précédente » se saisit manuellement chaque jour (mettez 0 si tout l'argent a été versé la veille). « Caisse du jour » se pré-remplit avec le CA du jour, à corriger selon le comptage réel. Les totaux « Bons » et « Versements » du jour s'affichent automatiquement — ils se saisissent désormais uniquement dans les onglets dédiés Bons et Versement, plus dans Caisse, pour éviter toute double saisie. Le Versement ne réduit pas la caisse attendue (il documente juste où est allé l'argent déjà compté) ; seuls le Bon et le Paiement marchand la réduisent réellement.",
   },
   {
     key: "inspection", title: "Inspection", adminOnly: false,
@@ -2594,7 +2833,11 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "versement", title: "Versement", adminOnly: false,
-    text: "Enregistrement des dépôts du jour : versement bancaire (nom de la banque, montant, photo du reçu), paiement marchand, et autre versement. Le cumul total des trois est calculé automatiquement.",
+    text: "Enregistrement des dépôts du jour : versement bancaire (nom de la banque, montant, photo du reçu), paiement marchand, et autre versement (avec libellé). Le cumul du jour se calcule automatiquement, même si les versements sont saisis séparément.",
+  },
+  {
+    key: "bons", title: "Bons", adminOnly: false,
+    text: "Enregistrement des bons de carburant (non payés en espèces) : libellé, quantité, prix unitaire, frais de route. Le montant et le cumul du jour se calculent automatiquement.",
   },
   {
     key: "rapport_jour", title: "Rapport journalier", adminOnly: false,
@@ -2686,7 +2929,7 @@ function GuideView({ profile }) {
 
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
@@ -2752,6 +2995,7 @@ const TABS = [
   { key: "inspection", label: "Inspection", icon: ClipboardCheck, adminOnly: false },
   { key: "reception", label: "Réception", icon: Truck, adminOnly: false },
   { key: "versement", label: "Versement", icon: Landmark, adminOnly: false },
+  { key: "bons", label: "Bons", icon: Wallet, adminOnly: false },
   { key: "mouvements", label: "Mouvements Pompiste", icon: Users, roles: ["gerant", "pompiste"] },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
   { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: false },
@@ -2798,6 +3042,7 @@ export default function App() {
       case "inspection": return <InspectionView db={db} setDb={setDb} profile={profile} />;
       case "reception": return <ReceptionView db={db} setDb={setDb} profile={profile} />;
       case "versement": return <VersementView db={db} setDb={setDb} profile={profile} />;
+      case "bons": return <BonsView db={db} setDb={setDb} profile={profile} />;
       case "mouvements": return <MouvementsPompisteView db={db} setDb={setDb} profile={profile} />;
       case "rapport": return <RapportMensuelView db={db} />;
       case "rapport_jour": return <RapportJournalierView db={db} profile={profile} />;
