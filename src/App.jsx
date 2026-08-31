@@ -99,6 +99,7 @@ function resizeImage(file, maxWidth = 700, quality = 0.6) {
 }
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const versementTotal = (v) => num(v.banqueMontant) + num(v.paiementMarchandMontant) + num(v.autreMontant);
 // fmtMontant accepte une devise explicite (celle de la station concernée) ; fmtGNF reste
 // disponible comme raccourci pour les rares affichages sans contexte de station.
 const fmtMontant = (v, devise = "GNF") => `${Math.round(num(v)).toLocaleString("fr-FR")} ${devise}`;
@@ -1482,6 +1483,7 @@ function VersementView({ db, setDb, profile }) {
   const [paiementMarchandMontant, setPaiementMarchandMontant] = useState("");
   const [autreMontant, setAutreMontant] = useState("");
   const [err, setErr] = useState("");
+  const [expandedDate, setExpandedDate] = useState(null);
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
 
@@ -1514,6 +1516,7 @@ function VersementView({ db, setDb, profile }) {
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "versement", action: "création", after: { date, banqueNom, total } });
     setDb(next);
     reset();
+    setExpandedDate(date);
   };
 
   const removeVersement = (v) => {
@@ -1526,6 +1529,23 @@ function VersementView({ db, setDb, profile }) {
   const history = db.versements
     .filter((v) => (isGerant ? v.stationId === profile.stationId : (!stationId || v.stationId === stationId)))
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.timestamp || "").localeCompare(a.timestamp || "")));
+
+  // Un même jour peut cumuler plusieurs versements (bancaire le matin, marchand le soir...)
+  // — on regroupe donc l'historique par date pour afficher un cumul journalier clair,
+  // avec le détail de chaque saisie disponible en dépliant la ligne.
+  const grouped = useMemo(() => {
+    const map = new Map();
+    history.forEach((v) => {
+      if (!map.has(v.date)) map.set(v.date, []);
+      map.get(v.date).push(v);
+    });
+    return Array.from(map.entries()).map(([d, entries]) => ({
+      date: d,
+      entries,
+      total: entries.reduce((a, e) => a + versementTotal(e), 0),
+      station: db.stations.find((s) => s.id === entries[0].stationId),
+    }));
+  }, [history, db.stations]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -1568,8 +1588,9 @@ function VersementView({ db, setDb, profile }) {
         </div>
 
         <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
-          <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
+          <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Total de cette saisie</p>
           <GaugeNumber value={fmtMontant(total, devise)} tone="amber" size="lg" />
+          <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Le cumul du jour (si plusieurs versements) s'affiche dans l'historique ci-dessous.</p>
         </div>
 
         <div className="flex items-center justify-end gap-3 mt-4">
@@ -1580,25 +1601,49 @@ function VersementView({ db, setDb, profile }) {
 
       <Card>
         <p className="font-semibold text-sm mb-3">Historique des versements</p>
-        {history.length === 0 ? (
+        {grouped.length === 0 ? (
           <EmptyState icon={Landmark} title="Aucun versement enregistré" hint="Les versements enregistrés apparaîtront ici." />
         ) : (
           <div className="flex flex-col gap-2">
-            {history.map((v) => {
-              const st = db.stations.find((s) => s.id === v.stationId);
-              const vTotal = num(v.banqueMontant) + num(v.paiementMarchandMontant) + num(v.autreMontant);
+            {grouped.map((g) => {
+              const open = expandedDate === g.date;
+              const dv = g.station?.devise || "GNF";
               return (
-                <div key={v.id} className="rounded-md p-3 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-                  {v.banquePhoto ? (
-                    <img src={v.banquePhoto} alt="" className="rounded-md flex-shrink-0" style={{ width: 48, height: 48, objectFit: "cover", border: `1px solid ${C.border}` }} />
-                  ) : (
-                    <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 48, height: 48, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Landmark size={18} /></div>
+                <div key={g.date} className="rounded-md" style={{ border: `1px solid ${C.border}` }}>
+                  <button onClick={() => setExpandedDate(open ? null : g.date)} className="smi-btn w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium">{fmtDateLong(g.date)}</span>
+                      <span className="text-xs" style={{ color: C.textFaint }}>{g.station?.nom || "—"}</span>
+                      {g.entries.length > 1 && <Pill tone="amber">{g.entries.length} versements</Pill>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold smi-mono" style={{ color: C.amber }}>{fmtMontant(g.total, dv)}</span>
+                      <ChevronDown size={16} style={{ transform: open ? "rotate(180deg)" : "none", color: C.textFaint }} />
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-3 pb-3 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+                      {g.entries.map((v) => {
+                        const vTotal = versementTotal(v);
+                        return (
+                          <div key={v.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                            {v.banquePhoto ? (
+                              <img src={v.banquePhoto} alt="" className="rounded-md flex-shrink-0" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} />
+                            ) : (
+                              <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Landmark size={16} /></div>
+                            )}
+                            <div className="flex-1 min-w-0 text-xs flex flex-col gap-0.5" style={{ color: C.textMuted }}>
+                              {num(v.banqueMontant) > 0 && <span>Bancaire{v.banqueNom ? ` (${v.banqueNom})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.banqueMontant, dv)}</span></span>}
+                              {num(v.paiementMarchandMontant) > 0 && <span>Paiement marchand : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.paiementMarchandMontant, dv)}</span></span>}
+                              {num(v.autreMontant) > 0 && <span>Autre versement : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
+                            </div>
+                            <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(vTotal, dv)}</span>
+                            {!isGerant && <button onClick={() => removeVersement(v)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={13} /></button>}
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium">{fmtMontant(vTotal, st?.devise || "GNF")}</p>
-                    <p className="text-xs truncate" style={{ color: C.textFaint }}>{fmtDateLong(v.date)} · {st?.nom || "—"} {v.banqueNom ? `· ${v.banqueNom}` : ""}</p>
-                  </div>
-                  {!isGerant && <button onClick={() => removeVersement(v)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={14} /></button>}
                 </div>
               );
             })}
@@ -1909,15 +1954,18 @@ function DashboardView({ db }) {
     const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, s.id, lastCaisseDate) : null;
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate };
-  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, monthPrefix]);
+    const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, monthPrefix]);
 
   const totalCA = rows.reduce((a, r) => a + r.ca, 0);
   const totalVol = rows.reduce((a, r) => a + r.vEssence + r.vGasoil, 0);
+  const totalVersementsReseau = rows.reduce((a, r) => a + r.totalVersements, 0);
   // Un réseau peut mélanger des stations en devises différentes : le total ne peut alors
   // pas être affiché comme un simple montant unique sans induire en erreur.
   const devises = new Set(db.stations.map((s) => s.devise || "GNF"));
   const totalCADisplay = devises.size <= 1 ? fmtMontant(totalCA, [...devises][0] || "GNF") : `${totalCA.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
+  const totalVersementsDisplay = devises.size <= 1 ? fmtMontant(totalVersementsReseau, [...devises][0] || "GNF") : `${totalVersementsReseau.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
 
   return (
     <div className="flex flex-col gap-4">
@@ -1926,9 +1974,10 @@ function DashboardView({ db }) {
         <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}) — mise à jour automatique à chaque saisie.</p>
       </div>
 
-      <div className="grid sm:grid-cols-2 gap-3">
+      <div className="grid sm:grid-cols-3 gap-3">
         <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Volume réseau (mois)</p><div className="mt-1"><GaugeNumber value={fmtVol(totalVol)} size="lg" tone="teal" /></div></Card>
         <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Chiffre d'affaires réseau (mois)</p><div className="mt-1"><GaugeNumber value={totalCADisplay} size="lg" tone="amber" /></div></Card>
+        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Versements réseau (mois)</p><div className="mt-1"><GaugeNumber value={totalVersementsDisplay} size="lg" tone="muted" /></div></Card>
       </div>
 
       {db.stations.length === 0 ? (
@@ -1948,6 +1997,7 @@ function DashboardView({ db }) {
                 <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (mois)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
               </div>
               <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (mois)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
+              <div><p className="text-xs" style={{ color: C.textFaint }}>Versements (mois)</p><GaugeNumber value={fmtMontant(r.totalVersements, devise)} tone="muted" /></div>
               <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
                 <div>
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
