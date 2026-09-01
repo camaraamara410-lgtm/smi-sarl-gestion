@@ -6,6 +6,7 @@ import {
   ClipboardCheck, Printer, ChevronDown, Truck, Camera, BookOpen, Landmark, Users
 } from "lucide-react";
 import { storage, isStorageDegraded, hasLocalStorage } from "./storage.js";
+import QRCode from "qrcode";
 
 /* =========================================================================
    SMI SARL — Gestion quotidienne du réseau de stations-service
@@ -518,6 +519,22 @@ function ImageLightbox({ src, onClose }) {
       <img src={src} alt="" style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 8 }} onClick={(e) => e.stopPropagation()} />
     </div>
   );
+}
+
+// QR code généré localement (aucun appel réseau) — utilisé dans le pied de page des
+// rapports imprimés/exportés en PDF, pour retrouver l'application en scannant plutôt
+// qu'en retapant l'adresse.
+function QrCode({ value, size = 90 }) {
+  const [src, setSrc] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(value, { width: size, margin: 0, color: { dark: "#111111", light: "#ffffff" } })
+      .then((url) => { if (!cancelled) setSrc(url); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [value, size]);
+  if (!src) return <div style={{ width: size, height: size }} />;
+  return <img src={src} alt="Code QR de l'application" width={size} height={size} />;
 }
 
 function EmptyState({ icon: Icon, title, hint }) {
@@ -2414,6 +2431,7 @@ function RapportJournalierView({ db, profile }) {
   const isGerant = profile.role === "gerant";
   const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
   const [date, setDate] = useState(todayISO());
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   const rows = useMemo(() => db.stations.map((s) => {
     const v = computeVente(db.releves, db.ventes, s.id, date);
@@ -2532,6 +2550,15 @@ function RapportJournalierView({ db, profile }) {
               </table>
             </div>
           </Card>
+          <div className="hidden smi-print-only" style={{ marginTop: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <QrCode value={appUrl} size={64} />
+              <div>
+                <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+                <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         // Station choisie : rapport détaillé au format papier (index pompes, stock, caisse).
@@ -2730,6 +2757,15 @@ function RapportJournalierView({ db, profile }) {
               </>
             )}
           </Card>
+          <div className="hidden smi-print-only" style={{ marginTop: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <QrCode value={appUrl} size={64} />
+              <div>
+                <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+                <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
