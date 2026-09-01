@@ -2284,13 +2284,14 @@ function RapportMensuelView({ db }) {
   const [stationId, setStationId] = useState("");
   const [month, setMonth] = useState(now.getMonth());
   const [year, setYear] = useState(now.getFullYear());
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   const stationsToShow = stationId ? db.stations.filter((s) => s.id === stationId) : db.stations;
   const prefix = `${year}-${String(month + 1).padStart(2, "0")}`;
 
-  // useMemo : ce calcul relit et recombine tous les relevés/ventes du mois pour chaque
-  // station à chaque rendu — coûteux quand l'historique grandit. On ne le refait que si
-  // les données sources ou les filtres changent réellement.
+  // useMemo : ce calcul relit et recombine tous les relevés/ventes/versements/bons/stocks
+  // du mois pour chaque station à chaque rendu — coûteux quand l'historique grandit. On ne
+  // le refait que si les données sources ou les filtres changent réellement.
   const results = useMemo(() => stationsToShow.map((s) => {
     const dates = [...new Set(db.releves.filter((r) => r.stationId === s.id && r.date.startsWith(prefix)).map((r) => r.date))].sort();
     let vEssence = 0, vGasoil = 0, ca = 0;
@@ -2299,19 +2300,45 @@ function RapportMensuelView({ db }) {
       vEssence += v.essence; vGasoil += v.gasoil; ca += v.ca;
       return { date: d, ...v };
     });
-    return { station: s, daily, vEssence, vGasoil, ca };
-  }), [stationsToShow, db.releves, db.ventes, prefix]);
+    const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(prefix)).reduce((a, v) => a + versementTotal(v), 0);
+    const totalBons = db.bons.filter((b) => b.stationId === s.id && b.date.startsWith(prefix)).reduce((a, b) => a + bonTotal(b), 0);
+    // Dernière caisse du mois : ce qui restait physiquement en caisse au dernier contrôle
+    // du mois (comptage réel si saisi, sinon la caisse attendue calculée) — l'argent qui
+    // n'a ni été versé, ni justifié par un bon, mais qui n'a pas non plus disparu.
+    const caissesDuMois = [...db.caisses].filter((x) => x.stationId === s.id && x.date.startsWith(prefix)).sort((a, b) => (a.date < b.date ? 1 : -1));
+    const derniereCaisseRecord = caissesDuMois[0];
+    const derniereCaisseComputed = derniereCaisseRecord ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, derniereCaisseRecord.date) : null;
+    const derniereCaisse = derniereCaisseComputed ? (derniereCaisseComputed.caisseDuJour !== null ? derniereCaisseComputed.caisseDuJour : derniereCaisseComputed.caisseAttendue) : 0;
+    // Écart de contrôle : en théorie, ce qui a été vendu (CA) doit se retrouver soit versé
+    // (banque/marchand/autre), soit justifié par un bon, soit encore physiquement en
+    // caisse — sinon il manque de l'argent.
+    const ecart = ca - (totalVersements + totalBons + derniereCaisse);
+    // Stock restant : dernier contrôle de stock enregistré dans le mois (à défaut, le plus
+    // récent avant la fin du mois).
+    const stocksDuMois = [...db.stocks].filter((x) => x.stationId === s.id && x.date.startsWith(prefix)).sort((a, b) => (a.date < b.date ? 1 : -1));
+    const stockRecord = stocksDuMois[0] || [...db.stocks].filter((x) => x.stationId === s.id && x.date <= `${prefix}-31`).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    const stock = stockRecord ? computeStock(db.releves, db.stocks, s.id, stockRecord.date) : null;
+    return { station: s, daily, vEssence, vGasoil, ca, totalVersements, totalBons, derniereCaisse, ecart, stock, stockDate: stockRecord?.date };
+  }), [stationsToShow, db.releves, db.ventes, db.versements, db.bons, db.caisses, db.stocks, prefix]);
 
-  const grandTotal = results.reduce((a, r) => ({ vEssence: a.vEssence + r.vEssence, vGasoil: a.vGasoil + r.vGasoil, ca: a.ca + r.ca }), { vEssence: 0, vGasoil: 0, ca: 0 });
+  const grandTotal = results.reduce((a, r) => ({
+    vEssence: a.vEssence + r.vEssence, vGasoil: a.vGasoil + r.vGasoil, ca: a.ca + r.ca,
+    totalVersements: a.totalVersements + r.totalVersements, totalBons: a.totalBons + r.totalBons, derniereCaisse: a.derniereCaisse + r.derniereCaisse, ecart: a.ecart + r.ecart,
+  }), { vEssence: 0, vGasoil: 0, ca: 0, totalVersements: 0, totalBons: 0, derniereCaisse: 0, ecart: 0 });
   const devises = new Set(stationsToShow.map((s) => s.devise || "GNF"));
   const grandTotalCaDisplay = devises.size <= 1 ? fmtMontant(grandTotal.ca, [...devises][0] || "GNF") : `${grandTotal.ca.toLocaleString("fr-FR")} (multi-devises)`;
+  const grandTotalEcartDisplay = devises.size <= 1 ? fmtMontant(grandTotal.ecart, [...devises][0] || "GNF") : `${grandTotal.ecart.toLocaleString("fr-FR")} (multi-devises)`;
 
   // Export CSV — donne enfin un livrable exploitable en comptabilité/audit plutôt qu'un
   // simple tableau à l'écran. Génération 100% côté navigateur, aucun envoi réseau.
   const exportCsv = () => {
-    const rows = [["Station", "Devise", "Volume Essence (L)", "Volume Gasoil (L)", "Volume Total (L)", "Chiffre d'affaires"]];
-    results.forEach((r) => rows.push([r.station.nom, r.station.devise || "GNF", r.vEssence.toFixed(2), r.vGasoil.toFixed(2), (r.vEssence + r.vGasoil).toFixed(2), r.ca.toFixed(2)]));
-    rows.push(["Total", "", grandTotal.vEssence.toFixed(2), grandTotal.vGasoil.toFixed(2), (grandTotal.vEssence + grandTotal.vGasoil).toFixed(2), grandTotal.ca.toFixed(2)]);
+    const rows = [["Station", "Devise", "Volume Essence (L)", "Volume Gasoil (L)", "Volume Total (L)", "Chiffre d'affaires", "Total Versements", "Total Bons", "Dernière caisse", "Écart (CA - Versements - Bons - Dernière caisse)", "Stock Essence restant (L)", "Stock Gasoil restant (L)"]];
+    results.forEach((r) => rows.push([
+      r.station.nom, r.station.devise || "GNF", r.vEssence.toFixed(2), r.vGasoil.toFixed(2), (r.vEssence + r.vGasoil).toFixed(2), r.ca.toFixed(2),
+      r.totalVersements.toFixed(2), r.totalBons.toFixed(2), r.derniereCaisse.toFixed(2), r.ecart.toFixed(2),
+      r.stock ? r.stock.stockClotureEssence.toFixed(2) : "", r.stock ? r.stock.stockClotureGasoil.toFixed(2) : "",
+    ]));
+    rows.push(["Total", "", grandTotal.vEssence.toFixed(2), grandTotal.vGasoil.toFixed(2), (grandTotal.vEssence + grandTotal.vGasoil).toFixed(2), grandTotal.ca.toFixed(2), grandTotal.totalVersements.toFixed(2), grandTotal.totalBons.toFixed(2), grandTotal.derniereCaisse.toFixed(2), grandTotal.ecart.toFixed(2), "", ""]);
     if (stationId && results[0]) {
       rows.push([]);
       rows.push([`Détail journalier — ${results[0].station.nom}`]);
@@ -2330,17 +2357,22 @@ function RapportMensuelView({ db }) {
     URL.revokeObjectURL(url);
   };
 
+  const exportPdf = () => window.print();
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
         <div>
           <h2 className="smi-display text-2xl">Rapport mensuel</h2>
-          <p className="text-sm" style={{ color: C.textMuted }}>Filtrez par station, mois et année pour consolider volumes et chiffre d'affaires.</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>Filtrez par station, mois et année pour consolider volumes, chiffre d'affaires, versements, bons et stock restant.</p>
         </div>
-        <Button variant="ghost" onClick={exportCsv} disabled={results.length === 0}><Download size={16} /> Exporter en CSV</Button>
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={exportCsv} disabled={results.length === 0}><Download size={16} /> Exporter en CSV</Button>
+          <Button variant="ghost" onClick={exportPdf} disabled={results.length === 0}><Printer size={16} /> Exporter en PDF</Button>
+        </div>
       </div>
 
-      <Card>
+      <Card className="smi-no-print">
         <div className="grid sm:grid-cols-3 gap-3">
           <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} allowAll /></Field>
           <Field label="Mois">
@@ -2351,6 +2383,12 @@ function RapportMensuelView({ db }) {
           <Field label="Année"><NumberInput value={year} onChange={(e) => setYear(Number(e.target.value) || now.getFullYear())} /></Field>
         </div>
       </Card>
+
+      <div className="smi-print-area flex flex-col gap-4">
+        <div className="hidden smi-print-only mb-2">
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport mensuel</h1>
+          <p style={{ fontSize: 13, color: "#444" }}>{monthLabel(month)} {year}{stationId && results[0] ? ` — ${results[0].station.nom}` : " — Toutes stations"}</p>
+        </div>
 
       <Card>
         <p className="font-semibold text-sm mb-3">Synthèse — {monthLabel(month)} {year}</p>
@@ -2363,20 +2401,34 @@ function RapportMensuelView({ db }) {
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Volume Gasoil</th>
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Volume Total</th>
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Chiffre d'affaires</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total Versements</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total Bons</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Dernière caisse</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Stock restant (E / G)</th>
               </tr>
             </thead>
             <tbody>
-              {results.map((r) => (
-                <tr key={r.station.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                  <td className="py-1.5 font-semibold">{r.station.nom}</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtVol(r.vEssence)}</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtVol(r.vGasoil)}</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtVol(r.vEssence + r.vGasoil)}</td>
-                  <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: C.amber }}>{fmtMontant(r.ca, r.station.devise || "GNF")}</td>
-                </tr>
-              ))}
+              {results.map((r) => {
+                const dv = r.station.devise || "GNF";
+                const ecartOk = Math.abs(r.ecart) < 1;
+                return (
+                  <tr key={r.station.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td className="py-1.5 font-semibold">{r.station.nom}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtVol(r.vEssence)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtVol(r.vGasoil)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtVol(r.vEssence + r.vGasoil)}</td>
+                    <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: C.amber }}>{fmtMontant(r.ca, dv)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(r.totalVersements, dv)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(r.totalBons, dv)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(r.derniereCaisse, dv)}</td>
+                    <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: ecartOk ? C.success : C.danger }}>{fmtMontant(r.ecart, dv)}</td>
+                    <td className="py-1.5 text-right smi-mono">{r.stock ? `${fmtVol(r.stock.stockClotureEssence)} / ${fmtVol(r.stock.stockClotureGasoil)}` : "—"}</td>
+                  </tr>
+                );
+              })}
               {results.length === 0 && (
-                <tr><td colSpan={5} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune donnée pour cette période.</td></tr>
+                <tr><td colSpan={10} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune donnée pour cette période.</td></tr>
               )}
             </tbody>
             {results.length > 0 && (
@@ -2387,11 +2439,17 @@ function RapportMensuelView({ db }) {
                   <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vGasoil)}</td>
                   <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vEssence + grandTotal.vGasoil)}</td>
                   <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{grandTotalCaDisplay}</td>
+                  <td className="py-2 text-right smi-mono font-bold">{devises.size <= 1 ? fmtMontant(grandTotal.totalVersements, [...devises][0] || "GNF") : "—"}</td>
+                  <td className="py-2 text-right smi-mono font-bold">{devises.size <= 1 ? fmtMontant(grandTotal.totalBons, [...devises][0] || "GNF") : "—"}</td>
+                  <td className="py-2 text-right smi-mono font-bold">{devises.size <= 1 ? fmtMontant(grandTotal.derniereCaisse, [...devises][0] || "GNF") : "—"}</td>
+                  <td className="py-2 text-right smi-mono font-bold" style={{ color: Math.abs(grandTotal.ecart) < 1 ? C.success : C.danger }}>{grandTotalEcartDisplay}</td>
+                  <td></td>
                 </tr>
               </tfoot>
             )}
           </table>
         </div>
+        <p className="text-[10px] italic mt-3" style={{ color: C.textFaint }}>Écart = Chiffre d'affaires − (Total Versements + Total Bons + Dernière caisse du mois). Proche de 0 : les ventes du mois sont justifiées par les versements, les bons, et ce qui reste physiquement en caisse. Un écart important signale un manque à vérifier.</p>
       </Card>
 
       {stationId && results[0]?.daily.length > 0 && (
@@ -2421,6 +2479,17 @@ function RapportMensuelView({ db }) {
           </div>
         </Card>
       )}
+
+        <div className="hidden smi-print-only" style={{ marginTop: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <QrCode value={appUrl} size={64} />
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+              <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
