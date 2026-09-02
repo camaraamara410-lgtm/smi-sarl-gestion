@@ -2381,23 +2381,22 @@ function RapportMensuelView({ db }) {
     });
     const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(prefix)).reduce((a, v) => a + versementTotal(v), 0);
     const totalBons = db.bons.filter((b) => b.stationId === s.id && b.date.startsWith(prefix)).reduce((a, b) => a + bonTotal(b), 0);
-    // Dernière caisse du mois : exactement la valeur saisie manuellement dans « Caisse
-    // précédente » lors du dernier contrôle du mois — pas un montant recalculé après les
-    // ventes de ce jour (qui inclurait à tort le chiffre d'affaires du jour même et
-    // fausserait la comparaison avec les versements déjà faits).
-    const caissesDuMois = [...db.caisses].filter((x) => x.stationId === s.id && x.date.startsWith(prefix)).sort((a, b) => (a.date < b.date ? 1 : -1));
-    const derniereCaisseRecord = caissesDuMois[0];
-    const derniereCaisse = derniereCaisseRecord ? num(derniereCaisseRecord.caissePrecedente) : 0;
-    // Écart de contrôle : en théorie, ce qui a été vendu (CA) doit se retrouver soit versé
-    // (banque/marchand/autre), soit justifié par un bon, soit encore physiquement en
-    // caisse — sinon il manque de l'argent.
-    const ecart = ca - (totalVersements + totalBons + derniereCaisse);
+    // Dernière caisse (théorique, fin de mois) = Caisse précédente du début du mois +
+    // Chiffre d'affaires du mois − Total Versements − Total Bons. Ce calcul reste correct
+    // même quand un versement du mois règle en réalité de l'argent accumulé un mois
+    // antérieur, puisqu'on ne compare plus le CA du mois à des versements qui peuvent lui
+    // être étrangers — on part du solde réel de départ et on ajoute/retranche seulement ce
+    // qui s'est passé ce mois-ci.
+    const caissesDuMois = [...db.caisses].filter((x) => x.stationId === s.id && x.date.startsWith(prefix)).sort((a, b) => (a.date < b.date ? -1 : 1));
+    const premiereCaisseRecord = caissesDuMois[0];
+    const caissePrecedenteDebutMois = premiereCaisseRecord ? num(premiereCaisseRecord.caissePrecedente) : 0;
+    const derniereCaisse = caissePrecedenteDebutMois + ca - totalVersements - totalBons;
     // Stock restant : dernier contrôle de stock enregistré dans le mois (à défaut, le plus
     // récent avant la fin du mois).
     const stocksDuMois = [...db.stocks].filter((x) => x.stationId === s.id && x.date.startsWith(prefix)).sort((a, b) => (a.date < b.date ? 1 : -1));
     const stockRecord = stocksDuMois[0] || [...db.stocks].filter((x) => x.stationId === s.id && x.date <= `${prefix}-31`).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
     const stock = stockRecord ? computeStock(db.releves, db.stocks, s.id, stockRecord.date) : null;
-    return { station: s, daily, vEssence, vGasoil, ca, totalVersements, totalBons, derniereCaisse, ecart, stock, stockDate: stockRecord?.date };
+    return { station: s, daily, vEssence, vGasoil, ca, totalVersements, totalBons, derniereCaisse, stock, stockDate: stockRecord?.date };
   }), [stationsToShow, db.releves, db.ventes, db.versements, db.bons, db.caisses, db.stocks, prefix]);
 
   const devises = new Set(stationsToShow.map((s) => s.devise || "GNF"));
@@ -2405,10 +2404,10 @@ function RapportMensuelView({ db }) {
   // Export CSV — donne enfin un livrable exploitable en comptabilité/audit plutôt qu'un
   // simple tableau à l'écran. Génération 100% côté navigateur, aucun envoi réseau.
   const exportCsv = () => {
-    const rows = [["Station", "Devise", "Volume Essence (L)", "Volume Gasoil (L)", "Volume Total (L)", "Chiffre d'affaires", "Total Versements", "Total Bons", "Dernière caisse", "Écart (CA - Versements - Bons - Dernière caisse)", "Stock Essence restant (L)", "Stock Gasoil restant (L)"]];
+    const rows = [["Station", "Devise", "Volume Essence (L)", "Volume Gasoil (L)", "Volume Total (L)", "Chiffre d'affaires", "Total Versements", "Total Bons", "Caisse théorique (fin de mois)", "Stock Essence restant (L)", "Stock Gasoil restant (L)"]];
     results.forEach((r) => rows.push([
       r.station.nom, r.station.devise || "GNF", r.vEssence.toFixed(2), r.vGasoil.toFixed(2), (r.vEssence + r.vGasoil).toFixed(2), r.ca.toFixed(2),
-      r.totalVersements.toFixed(2), r.totalBons.toFixed(2), r.derniereCaisse.toFixed(2), r.ecart.toFixed(2),
+      r.totalVersements.toFixed(2), r.totalBons.toFixed(2), r.derniereCaisse.toFixed(2),
       r.stock ? r.stock.stockClotureEssence.toFixed(2) : "", r.stock ? r.stock.stockClotureGasoil.toFixed(2) : "",
     ]));
     if (stationId && results[0]) {
@@ -2475,15 +2474,13 @@ function RapportMensuelView({ db }) {
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Chiffre d'affaires</th>
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total Versements</th>
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total Bons</th>
-                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Dernière caisse</th>
-                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Écart</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Caisse théorique (fin de mois)</th>
                 <th className="text-right py-1.5" style={{ color: C.textMuted }}>Stock restant (E / G)</th>
               </tr>
             </thead>
             <tbody>
               {results.map((r) => {
                 const dv = r.station.devise || "GNF";
-                const ecartOk = Math.abs(r.ecart) < 1;
                 return (
                   <tr key={r.station.id} style={{ borderBottom: `1px solid ${C.border}` }}>
                     <td className="py-1.5 font-semibold">{r.station.nom}</td>
@@ -2493,19 +2490,18 @@ function RapportMensuelView({ db }) {
                     <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: C.amber }}>{fmtMontant(r.ca, dv)}</td>
                     <td className="py-1.5 text-right smi-mono">{fmtMontant(r.totalVersements, dv)}</td>
                     <td className="py-1.5 text-right smi-mono">{fmtMontant(r.totalBons, dv)}</td>
-                    <td className="py-1.5 text-right smi-mono">{fmtMontant(r.derniereCaisse, dv)}</td>
-                    <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: ecartOk ? C.success : C.danger }}>{fmtMontant(r.ecart, dv)}</td>
+                    <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: r.derniereCaisse < 0 ? C.danger : C.text }}>{fmtMontant(r.derniereCaisse, dv)}</td>
                     <td className="py-1.5 text-right smi-mono">{r.stock ? `${fmtVol(r.stock.stockClotureEssence)} / ${fmtVol(r.stock.stockClotureGasoil)}` : "—"}</td>
                   </tr>
                 );
               })}
               {results.length === 0 && (
-                <tr><td colSpan={10} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune donnée pour cette période.</td></tr>
+                <tr><td colSpan={9} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune donnée pour cette période.</td></tr>
               )}
             </tbody>
           </table>
         </div>
-        <p className="text-[10px] italic mt-3" style={{ color: C.textFaint }}>Chaque ligne concerne une seule station — les chiffres ne sont jamais additionnés entre stations. « Dernière caisse » reprend la valeur saisie dans Caisse précédente lors du dernier contrôle du mois. Écart = Chiffre d'affaires − (Total Versements + Total Bons + Dernière caisse). Proche de 0 : les ventes du mois sont justifiées. Un écart important signale un manque à vérifier — ou un versement déjà fait mais pas encore répercuté dans la Caisse précédente du jour suivant.</p>
+        <p className="text-[10px] italic mt-3" style={{ color: C.textFaint }}>Chaque ligne concerne une seule station — les chiffres ne sont jamais additionnés entre stations. « Caisse théorique (fin de mois) » = Caisse précédente du début du mois + Chiffre d'affaires du mois − Total Versements − Total Bons : c'est ce qui devrait rester physiquement en caisse à la fin du mois. Un montant négatif signale un manque à vérifier (plus versé/justifié par des bons que ce qui a été réellement disponible).</p>
       </Card>
 
       {stationId && results[0]?.daily.length > 0 && (
