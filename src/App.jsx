@@ -1711,6 +1711,10 @@ function VersementView({ db, setDb, profile }) {
     }));
   }, [history, db.stations]);
 
+  // Cumul automatique sur toute la période affichée — recalculé dès qu'un versement est
+  // ajouté ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
+  const cumulTotal = history.reduce((a, v) => a + versementTotal(v), 0);
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -1768,6 +1772,12 @@ function VersementView({ db, setDb, profile }) {
 
       <Card>
         <p className="font-semibold text-sm mb-3">Historique des versements</p>
+        {grouped.length > 0 && (
+          <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
+            <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" size="lg" />
+          </div>
+        )}
         {grouped.length === 0 ? (
           <EmptyState icon={Landmark} title="Aucun versement enregistré" hint="Les versements enregistrés apparaîtront ici." />
         ) : (
@@ -1885,6 +1895,10 @@ function BonsView({ db, setDb, profile }) {
     }));
   }, [history, db.stations]);
 
+  // Cumul automatique sur toute la période affichée — recalculé dès qu'un bon est ajouté
+  // ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
+  const cumulTotal = history.reduce((a, b) => a + bonTotal(b), 0);
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -1923,6 +1937,12 @@ function BonsView({ db, setDb, profile }) {
 
       <Card>
         <p className="font-semibold text-sm mb-3">Historique des bons</p>
+        {grouped.length > 0 && (
+          <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
+            <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" size="lg" />
+          </div>
+        )}
         {grouped.length === 0 ? (
           <EmptyState icon={Wallet} title="Aucun bon enregistré" hint="Les bons enregistrés apparaîtront ici." />
         ) : (
@@ -2019,6 +2039,11 @@ function ReceptionView({ db, setDb, profile }) {
     .filter((r) => (isGerant ? r.stationId === profile.stationId : (!stationId || r.stationId === stationId)))
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.timestamp || "").localeCompare(a.timestamp || "")));
 
+  // Cumul automatique — recalculé à chaque nouvelle réception ajoutée ou supprimée,
+  // puisqu'il est dérivé directement de la liste affichée.
+  const cumulEssence = history.filter((r) => r.produit === "essence").reduce((a, r) => a + num(r.quantite), 0);
+  const cumulGasoil = history.filter((r) => r.produit === "gasoil").reduce((a, r) => a + num(r.quantite), 0);
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -2069,6 +2094,15 @@ function ReceptionView({ db, setDb, profile }) {
 
       <Card>
         <p className="font-semibold text-sm mb-3">Historique des réceptions</p>
+        {history.length > 0 && (
+          <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total reçu</p>
+            <div className="flex gap-4">
+              <GaugeNumber value={`${fmtVol(cumulEssence)} Essence`} tone="amber" />
+              <GaugeNumber value={`${fmtVol(cumulGasoil)} Gasoil`} tone="teal" />
+            </div>
+          </div>
+        )}
         {history.length === 0 ? (
           <EmptyState icon={Truck} title="Aucune réception enregistrée" hint="Les livraisons enregistrées apparaîtront ici." />
         ) : (
@@ -2274,26 +2308,11 @@ function DashboardView({ db }) {
     return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, monthPrefix]);
 
-  const totalCA = rows.reduce((a, r) => a + r.ca, 0);
-  const totalVol = rows.reduce((a, r) => a + r.vEssence + r.vGasoil, 0);
-  const totalVersementsReseau = rows.reduce((a, r) => a + r.totalVersements, 0);
-  // Un réseau peut mélanger des stations en devises différentes : le total ne peut alors
-  // pas être affiché comme un simple montant unique sans induire en erreur.
-  const devises = new Set(db.stations.map((s) => s.devise || "GNF"));
-  const totalCADisplay = devises.size <= 1 ? fmtMontant(totalCA, [...devises][0] || "GNF") : `${totalCA.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
-  const totalVersementsDisplay = devises.size <= 1 ? fmtMontant(totalVersementsReseau, [...devises][0] || "GNF") : `${totalVersementsReseau.toLocaleString("fr-FR")} (multi-devises, voir par station)`;
-
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Tableau de bord</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}) — mise à jour automatique à chaque saisie.</p>
-      </div>
-
-      <div className="grid sm:grid-cols-3 gap-3">
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Volume réseau (mois)</p><div className="mt-1"><GaugeNumber value={fmtVol(totalVol)} size="lg" tone="teal" /></div></Card>
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Chiffre d'affaires réseau (mois)</p><div className="mt-1"><GaugeNumber value={totalCADisplay} size="lg" tone="amber" /></div></Card>
-        <Card><p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Versements réseau (mois)</p><div className="mt-1"><GaugeNumber value={totalVersementsDisplay} size="lg" tone="muted" /></div></Card>
+        <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}), station par station — mise à jour automatique à chaque saisie.</p>
       </div>
 
       {db.stations.length === 0 ? (
@@ -2362,13 +2381,13 @@ function RapportMensuelView({ db }) {
     });
     const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(prefix)).reduce((a, v) => a + versementTotal(v), 0);
     const totalBons = db.bons.filter((b) => b.stationId === s.id && b.date.startsWith(prefix)).reduce((a, b) => a + bonTotal(b), 0);
-    // Dernière caisse du mois : ce qui restait physiquement en caisse au dernier contrôle
-    // du mois (comptage réel si saisi, sinon la caisse attendue calculée) — l'argent qui
-    // n'a ni été versé, ni justifié par un bon, mais qui n'a pas non plus disparu.
+    // Dernière caisse du mois : exactement la valeur saisie manuellement dans « Caisse
+    // précédente » lors du dernier contrôle du mois — pas un montant recalculé après les
+    // ventes de ce jour (qui inclurait à tort le chiffre d'affaires du jour même et
+    // fausserait la comparaison avec les versements déjà faits).
     const caissesDuMois = [...db.caisses].filter((x) => x.stationId === s.id && x.date.startsWith(prefix)).sort((a, b) => (a.date < b.date ? 1 : -1));
     const derniereCaisseRecord = caissesDuMois[0];
-    const derniereCaisseComputed = derniereCaisseRecord ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, derniereCaisseRecord.date) : null;
-    const derniereCaisse = derniereCaisseComputed ? (derniereCaisseComputed.caisseDuJour !== null ? derniereCaisseComputed.caisseDuJour : derniereCaisseComputed.caisseAttendue) : 0;
+    const derniereCaisse = derniereCaisseRecord ? num(derniereCaisseRecord.caissePrecedente) : 0;
     // Écart de contrôle : en théorie, ce qui a été vendu (CA) doit se retrouver soit versé
     // (banque/marchand/autre), soit justifié par un bon, soit encore physiquement en
     // caisse — sinon il manque de l'argent.
@@ -2381,13 +2400,7 @@ function RapportMensuelView({ db }) {
     return { station: s, daily, vEssence, vGasoil, ca, totalVersements, totalBons, derniereCaisse, ecart, stock, stockDate: stockRecord?.date };
   }), [stationsToShow, db.releves, db.ventes, db.versements, db.bons, db.caisses, db.stocks, prefix]);
 
-  const grandTotal = results.reduce((a, r) => ({
-    vEssence: a.vEssence + r.vEssence, vGasoil: a.vGasoil + r.vGasoil, ca: a.ca + r.ca,
-    totalVersements: a.totalVersements + r.totalVersements, totalBons: a.totalBons + r.totalBons, derniereCaisse: a.derniereCaisse + r.derniereCaisse, ecart: a.ecart + r.ecart,
-  }), { vEssence: 0, vGasoil: 0, ca: 0, totalVersements: 0, totalBons: 0, derniereCaisse: 0, ecart: 0 });
   const devises = new Set(stationsToShow.map((s) => s.devise || "GNF"));
-  const grandTotalCaDisplay = devises.size <= 1 ? fmtMontant(grandTotal.ca, [...devises][0] || "GNF") : `${grandTotal.ca.toLocaleString("fr-FR")} (multi-devises)`;
-  const grandTotalEcartDisplay = devises.size <= 1 ? fmtMontant(grandTotal.ecart, [...devises][0] || "GNF") : `${grandTotal.ecart.toLocaleString("fr-FR")} (multi-devises)`;
 
   // Export CSV — donne enfin un livrable exploitable en comptabilité/audit plutôt qu'un
   // simple tableau à l'écran. Génération 100% côté navigateur, aucun envoi réseau.
@@ -2398,7 +2411,6 @@ function RapportMensuelView({ db }) {
       r.totalVersements.toFixed(2), r.totalBons.toFixed(2), r.derniereCaisse.toFixed(2), r.ecart.toFixed(2),
       r.stock ? r.stock.stockClotureEssence.toFixed(2) : "", r.stock ? r.stock.stockClotureGasoil.toFixed(2) : "",
     ]));
-    rows.push(["Total", "", grandTotal.vEssence.toFixed(2), grandTotal.vGasoil.toFixed(2), (grandTotal.vEssence + grandTotal.vGasoil).toFixed(2), grandTotal.ca.toFixed(2), grandTotal.totalVersements.toFixed(2), grandTotal.totalBons.toFixed(2), grandTotal.derniereCaisse.toFixed(2), grandTotal.ecart.toFixed(2), "", ""]);
     if (stationId && results[0]) {
       rows.push([]);
       rows.push([`Détail journalier — ${results[0].station.nom}`]);
@@ -2491,25 +2503,9 @@ function RapportMensuelView({ db }) {
                 <tr><td colSpan={10} className="py-6 text-center" style={{ color: C.textFaint }}>Aucune donnée pour cette période.</td></tr>
               )}
             </tbody>
-            {results.length > 0 && (
-              <tfoot>
-                <tr style={{ borderTop: `2px solid ${C.border}` }}>
-                  <td className="py-2 font-bold">Total</td>
-                  <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vEssence)}</td>
-                  <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vGasoil)}</td>
-                  <td className="py-2 text-right smi-mono font-bold">{fmtVol(grandTotal.vEssence + grandTotal.vGasoil)}</td>
-                  <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{grandTotalCaDisplay}</td>
-                  <td className="py-2 text-right smi-mono font-bold">{devises.size <= 1 ? fmtMontant(grandTotal.totalVersements, [...devises][0] || "GNF") : "—"}</td>
-                  <td className="py-2 text-right smi-mono font-bold">{devises.size <= 1 ? fmtMontant(grandTotal.totalBons, [...devises][0] || "GNF") : "—"}</td>
-                  <td className="py-2 text-right smi-mono font-bold">{devises.size <= 1 ? fmtMontant(grandTotal.derniereCaisse, [...devises][0] || "GNF") : "—"}</td>
-                  <td className="py-2 text-right smi-mono font-bold" style={{ color: Math.abs(grandTotal.ecart) < 1 ? C.success : C.danger }}>{grandTotalEcartDisplay}</td>
-                  <td></td>
-                </tr>
-              </tfoot>
-            )}
           </table>
         </div>
-        <p className="text-[10px] italic mt-3" style={{ color: C.textFaint }}>Écart = Chiffre d'affaires − (Total Versements + Total Bons + Dernière caisse du mois). Proche de 0 : les ventes du mois sont justifiées par les versements, les bons, et ce qui reste physiquement en caisse. Un écart important signale un manque à vérifier.</p>
+        <p className="text-[10px] italic mt-3" style={{ color: C.textFaint }}>Chaque ligne concerne une seule station — les chiffres ne sont jamais additionnés entre stations. « Dernière caisse » reprend la valeur saisie dans Caisse précédente lors du dernier contrôle du mois. Écart = Chiffre d'affaires − (Total Versements + Total Bons + Dernière caisse). Proche de 0 : les ventes du mois sont justifiées. Un écart important signale un manque à vérifier — ou un versement déjà fait mais pas encore répercuté dans la Caisse précédente du jour suivant.</p>
       </Card>
 
       {stationId && results[0]?.daily.length > 0 && (
