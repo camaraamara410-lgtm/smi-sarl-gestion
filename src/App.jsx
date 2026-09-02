@@ -558,6 +558,13 @@ function StationSelect({ stations, value, onChange, disabled, allowAll = false }
   );
 }
 
+// Une pompe ne dispense pas forcément les deux carburants — si aucune liste de produits
+// n'a été enregistrée (pompes créées avant cette fonctionnalité), on considère par défaut
+// qu'elle dispense les deux, pour ne rien casser sur les données existantes.
+function pompeHas(pompe, produit) {
+  return !pompe || !pompe.produits || pompe.produits.includes(produit);
+}
+
 function PompeSelect({ pompes, stationId, value, onChange, disabled }) {
   const list = pompes.filter((p) => p.stationId === stationId);
   return (
@@ -821,12 +828,23 @@ function StationsView({ db, setDb, profile }) {
 function PompesView({ db, setDb, profile }) {
   const [form, setForm] = useState(null);
 
+  const toggleProduit = (produit) => {
+    setForm((f) => {
+      const current = f.produits || ["essence", "gasoil"];
+      const has = current.includes(produit);
+      let next = has ? current.filter((p) => p !== produit) : [...current, produit];
+      if (next.length === 0) next = current; // au moins un produit doit rester sélectionné
+      return { ...f, produits: next };
+    });
+  };
+
   const save = () => {
     if (!form.nom?.trim() || !form.stationId) return;
+    const record = { ...form, produits: form.produits || ["essence", "gasoil"] };
     let next = { ...db };
-    if (form.id) next.pompes = db.pompes.map((p) => (p.id === form.id ? form : p));
-    else next.pompes = [...db.pompes, { ...form, id: uid() }];
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: form.stationId, entity: "pompe", action: form.id ? "modification" : "création", after: { nom: form.nom } });
+    if (record.id) next.pompes = db.pompes.map((p) => (p.id === record.id ? record : p));
+    else next.pompes = [...db.pompes, { ...record, id: uid() }];
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: record.stationId, entity: "pompe", action: record.id ? "modification" : "création", after: { nom: record.nom, produits: record.produits } });
     setDb(next);
     setForm(null);
   };
@@ -847,7 +865,7 @@ function PompesView({ db, setDb, profile }) {
           <h2 className="smi-display text-2xl">Pompes</h2>
           <p className="text-sm" style={{ color: C.textMuted }}>Chaque pompe est rattachée à une station et alimente automatiquement les relevés, ventes et stocks.</p>
         </div>
-        <Button onClick={() => setForm({ stationId: db.stations[0]?.id || "" })} disabled={db.stations.length === 0}><Plus size={16} /> Nouvelle pompe</Button>
+        <Button onClick={() => setForm({ stationId: db.stations[0]?.id || "", produits: ["essence", "gasoil"] })} disabled={db.stations.length === 0}><Plus size={16} /> Nouvelle pompe</Button>
       </div>
 
       {db.stations.length === 0 && <EmptyState icon={Gauge} title="Créez d'abord une station" hint="Les pompes doivent être rattachées à une station existante." />}
@@ -857,6 +875,25 @@ function PompesView({ db, setDb, profile }) {
           <div className="grid sm:grid-cols-2 gap-3">
             <Field label="Nom de la pompe"><TextInput value={form.nom || ""} onChange={(e) => setForm({ ...form, nom: e.target.value })} placeholder="Ex. P1" /></Field>
             <Field label="Station associée"><StationSelect stations={db.stations} value={form.stationId} onChange={(v) => setForm({ ...form, stationId: v })} /></Field>
+          </div>
+          <div className="mt-3">
+            <p className="text-xs font-medium mb-2" style={{ color: C.textMuted }}>Produits dispensés par cette pompe</p>
+            <div className="flex gap-2">
+              {[{ k: "essence", label: "Essence" }, { k: "gasoil", label: "Gasoil" }].map((p) => {
+                const active = (form.produits || ["essence", "gasoil"]).includes(p.k);
+                return (
+                  <button
+                    key={p.k}
+                    onClick={() => toggleProduit(p.k)}
+                    className="smi-btn rounded-md px-3 py-2 text-sm"
+                    style={{ background: active ? C.amberSoft : C.bgAlt, border: `1px solid ${active ? C.amber : C.border}`, color: active ? C.amber : C.textMuted }}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Choisissez les deux si la pompe dispense les deux carburants.</p>
           </div>
           <div className="flex gap-2 mt-4">
             <Button onClick={save}><CheckCircle2 size={16} /> Enregistrer</Button>
@@ -874,6 +911,7 @@ function PompesView({ db, setDb, profile }) {
               <tr style={{ background: C.panelAlt }}>
                 <th className="text-left px-3 py-2 font-semibold" style={{ color: C.textMuted }}>Pompe</th>
                 <th className="text-left px-3 py-2 font-semibold" style={{ color: C.textMuted }}>Station</th>
+                <th className="text-left px-3 py-2 font-semibold" style={{ color: C.textMuted }}>Produits</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -882,6 +920,12 @@ function PompesView({ db, setDb, profile }) {
                 <tr key={p.id} style={{ borderTop: `1px solid ${C.border}` }}>
                   <td className="px-3 py-2 font-semibold">{p.nom}</td>
                   <td className="px-3 py-2" style={{ color: C.textMuted }}>{db.stations.find((s) => s.id === p.stationId)?.nom || "—"}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex gap-1.5">
+                      {pompeHas(p, "essence") && <Pill tone="amber">Essence</Pill>}
+                      {pompeHas(p, "gasoil") && <Pill tone="teal">Gasoil</Pill>}
+                    </div>
+                  </td>
                   <td className="px-3 py-2 text-right">
                     <div className="inline-flex gap-2">
                       <Button variant="ghost" onClick={() => setForm(p)}><Pencil size={13} /></Button>
@@ -942,6 +986,9 @@ function RelevePompesView({ db, setDb, profile }) {
   const vg = Math.max(0, num(idxCG) - num(idxOG));
   const cumul = sumReleve(db.releves, stationId, date);
   const [err, setErr] = useState("");
+  const pompe = db.pompes.find((p) => p.id === pompeId);
+  const showEssence = pompeHas(pompe, "essence");
+  const showGasoil = pompeHas(pompe, "gasoil");
 
   const save = () => {
     setErr("");
@@ -951,9 +998,15 @@ function RelevePompesView({ db, setDb, profile }) {
     const effStationId = isGerant ? profile.stationId : stationId;
     if (!effStationId || !pompeId) return;
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
-    if (idxOE !== "" && idxCE !== "" && num(idxCE) < num(idxOE)) { setErr("L'index de clôture essence est inférieur à l'index d'ouverture — vérifiez la saisie (compteur remis à zéro ?)."); return; }
-    if (idxOG !== "" && idxCG !== "" && num(idxCG) < num(idxOG)) { setErr("L'index de clôture gasoil est inférieur à l'index d'ouverture — vérifiez la saisie."); return; }
-    const row = { id: existing?.id || uid(), stationId: effStationId, pompeId, date, indexOuvertureEssence: idxOE, indexClotureEssence: idxCE, indexOuvertureGasoil: idxOG, indexClotureGasoil: idxCG };
+    if (showEssence && idxOE !== "" && idxCE !== "" && num(idxCE) < num(idxOE)) { setErr("L'index de clôture essence est inférieur à l'index d'ouverture — vérifiez la saisie (compteur remis à zéro ?)."); return; }
+    if (showGasoil && idxOG !== "" && idxCG !== "" && num(idxCG) < num(idxOG)) { setErr("L'index de clôture gasoil est inférieur à l'index d'ouverture — vérifiez la saisie."); return; }
+    // Une pompe qui ne dispense pas un carburant n'enregistre aucune valeur pour celui-ci,
+    // même si un ancien champ traînait en mémoire.
+    const row = {
+      id: existing?.id || uid(), stationId: effStationId, pompeId, date,
+      indexOuvertureEssence: showEssence ? idxOE : "", indexClotureEssence: showEssence ? idxCE : "",
+      indexOuvertureGasoil: showGasoil ? idxOG : "", indexClotureGasoil: showGasoil ? idxCG : "",
+    };
     let next = { ...db, releves: existing ? db.releves.map((r) => (r.id === existing.id ? row : r)) : [...db.releves, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "releve", action: existing ? "modification" : "création", before: existing ? { indexClotureEssence: existing.indexClotureEssence, indexClotureGasoil: existing.indexClotureGasoil } : null, after: { date, pompeId, indexClotureEssence: idxCE, indexClotureGasoil: idxCG } });
     setDb(next);
@@ -982,23 +1035,30 @@ function RelevePompesView({ db, setDb, profile }) {
           <div className="flex items-end">{existing && <Pill tone="teal">Relevé existant — modification</Pill>}</div>
         </div>
 
-        <div className="grid sm:grid-cols-2 gap-4 mt-4">
-          <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
-            <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.amber }}><Droplet size={13} /> Essence</p>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOE} onChange={(e) => setIdxOE(e.target.value)} /></Field>
-              <Field label="Index clôture"><NumberInput value={idxCE} onChange={(e) => setIdxCE(e.target.value)} /></Field>
+        <div className={`grid gap-4 mt-4 ${showEssence && showGasoil ? "sm:grid-cols-2" : ""}`}>
+          {showEssence && (
+            <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+              <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.amber }}><Droplet size={13} /> Essence</p>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOE} onChange={(e) => setIdxOE(e.target.value)} /></Field>
+                <Field label="Index clôture"><NumberInput value={idxCE} onChange={(e) => setIdxCE(e.target.value)} /></Field>
+              </div>
+              <div className="mt-2"><GaugeNumber value={fmtVol(ve)} tone="amber" /></div>
             </div>
-            <div className="mt-2"><GaugeNumber value={fmtVol(ve)} tone="amber" /></div>
-          </div>
-          <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
-            <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.teal }}><Droplet size={13} /> Gasoil</p>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOG} onChange={(e) => setIdxOG(e.target.value)} /></Field>
-              <Field label="Index clôture"><NumberInput value={idxCG} onChange={(e) => setIdxCG(e.target.value)} /></Field>
+          )}
+          {showGasoil && (
+            <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+              <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.teal }}><Droplet size={13} /> Gasoil</p>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOG} onChange={(e) => setIdxOG(e.target.value)} /></Field>
+                <Field label="Index clôture"><NumberInput value={idxCG} onChange={(e) => setIdxCG(e.target.value)} /></Field>
+              </div>
+              <div className="mt-2"><GaugeNumber value={fmtVol(vg)} tone="teal" /></div>
             </div>
-            <div className="mt-2"><GaugeNumber value={fmtVol(vg)} tone="teal" /></div>
-          </div>
+          )}
+          {!showEssence && !showGasoil && pompeId && (
+            <p className="text-sm" style={{ color: C.textFaint }}>Cette pompe n'a aucun produit configuré — vérifiez sa fiche dans l'onglet Pompes.</p>
+          )}
         </div>
 
         <div className="flex items-center justify-between mt-4">
@@ -1467,9 +1527,9 @@ function MouvementsPompisteView({ db, setDb, profile }) {
 
         <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
           <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Relevé de la pompe {pompe ? `« ${pompe.nom} »` : ""} — {fmtDateLong(date)}</p>
-          <div className="grid grid-cols-2 gap-2 text-sm mt-1">
-            <span>Essence : <span className="smi-mono">{fmtVol(live.vol.essence)}</span></span>
-            <span>Gasoil : <span className="smi-mono">{fmtVol(live.vol.gasoil)}</span></span>
+          <div className={`grid gap-2 text-sm mt-1 ${pompeHas(pompe, "essence") && pompeHas(pompe, "gasoil") ? "grid-cols-2" : "grid-cols-1"}`}>
+            {pompeHas(pompe, "essence") && <span>Essence : <span className="smi-mono">{fmtVol(live.vol.essence)}</span></span>}
+            {pompeHas(pompe, "gasoil") && <span>Gasoil : <span className="smi-mono">{fmtVol(live.vol.gasoil)}</span></span>}
           </div>
           <p className="text-xs mt-2" style={{ color: C.textFaint }}>Valeur de la vente : <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(live.valeurVente, devise)}</span></p>
         </div>
@@ -2530,8 +2590,8 @@ function RapportJournalierView({ db, profile }) {
       const r = db.releves.find((x) => x.stationId === stationId && x.pompeId === p.id && x.date === date);
       const oe = num(r?.indexOuvertureEssence), ce = num(r?.indexClotureEssence);
       const og = num(r?.indexOuvertureGasoil), cg = num(r?.indexClotureGasoil);
-      lines.push({ pompe: p.nom, produit: "Essence", ouverture: oe, cloture: ce, volume: Math.max(0, ce - oe) });
-      lines.push({ pompe: p.nom, produit: "Gasoil", ouverture: og, cloture: cg, volume: Math.max(0, cg - og) });
+      if (pompeHas(p, "essence")) lines.push({ pompe: p.nom, produit: "Essence", ouverture: oe, cloture: ce, volume: Math.max(0, ce - oe) });
+      if (pompeHas(p, "gasoil")) lines.push({ pompe: p.nom, produit: "Gasoil", ouverture: og, cloture: cg, volume: Math.max(0, cg - og) });
     });
     return lines;
   }, [db.pompes, db.releves, stationId, date]);
