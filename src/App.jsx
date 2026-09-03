@@ -581,8 +581,6 @@ const ADMIN_PIN_KEY = "smi_sarl_admin_pin_v1";
 
 function RoleGate({ db, onSet }) {
   const [role, setRole] = useState("admin");
-  const [stationId, setStationId] = useState("");
-  const [pompeId, setPompeId] = useState("");
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
   const [adminPinHash, setAdminPinHash] = useState(undefined); // undefined = chargement, null = pas encore défini
@@ -598,17 +596,14 @@ function RoleGate({ db, onSet }) {
     })();
   }, []);
 
-  const station = db.stations.find((s) => s.id === stationId);
-  const stationHasPin = !!station?.pinHash;
   const isFirstAdmin = role === "admin" && adminPinHash === null;
 
   const canSubmit = !busy && adminPinHash !== undefined
-    && (role === "pompiste" ? (name.trim().length > 0 && pin.trim().length > 0) : (name.trim().length > 0 && (role === "admin" ? true : !!stationId)));
+    && ((role === "pompiste" || role === "gerant") ? (name.trim().length > 0 && pin.trim().length > 0) : name.trim().length > 0);
 
   const submit = async () => {
     setErr("");
-    if (!name.trim()) { setErr(role === "pompiste" ? "Indiquez votre nom d'utilisateur." : "Indiquez votre nom : il apparaîtra dans le journal des saisies."); return; }
-    if (role === "gerant" && !stationId) { setErr("Choisissez votre station."); return; }
+    if (!name.trim()) { setErr((role === "pompiste" || role === "gerant") ? "Indiquez votre nom d'utilisateur." : "Indiquez votre nom : il apparaîtra dans le journal des saisies."); return; }
     setBusy(true);
     try {
       if (role === "pompiste") {
@@ -617,6 +612,14 @@ function RoleGate({ db, onSet }) {
         const acct = db.pompistes.find((p) => p.nom.trim().toLowerCase() === name.trim().toLowerCase() && p.passwordHash === h);
         if (!acct) { setErr("Nom ou mot de passe incorrect."); setBusy(false); return; }
         onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId, name: acct.nom });
+        return;
+      }
+      if (role === "gerant") {
+        if (!pin.trim()) { setErr("Indiquez votre mot de passe."); setBusy(false); return; }
+        const h = hashPin(pin.trim());
+        const acct = (db.gerants || []).find((g) => g.nom.trim().toLowerCase() === name.trim().toLowerCase() && g.passwordHash === h);
+        if (!acct) { setErr("Nom ou mot de passe incorrect."); setBusy(false); return; }
+        onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId || null, name: acct.nom });
         return;
       }
       if (role === "admin") {
@@ -628,11 +631,8 @@ function RoleGate({ db, onSet }) {
           const h = hashPin(pin.trim());
           if (h !== adminPinHash) { setErr("Code PIN administrateur incorrect."); setBusy(false); return; }
         }
-      } else if (stationHasPin) {
-        const h = hashPin(pin.trim());
-        if (h !== station.pinHash) { setErr("Code PIN de station incorrect."); setBusy(false); return; }
       }
-      onSet({ role, stationId: role === "admin" ? null : stationId, pompeId: role === "admin" ? null : pompeId || null, name: name.trim() });
+      onSet({ role, stationId: null, pompeId: null, name: name.trim() });
     } catch {
       setErr("Impossible de vérifier le code PIN pour le moment (problème de connexion au stockage). Réessayez.");
     } finally {
@@ -671,19 +671,9 @@ function RoleGate({ db, onSet }) {
         </div>
 
         {role === "gerant" && (
-          <div className="flex flex-col gap-3 mb-4">
-            <Field label="Station affectée">
-              <StationSelect stations={db.stations} value={stationId} onChange={setStationId} />
-            </Field>
-            {db.stations.length === 0 && (
-              <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}>
-                <AlertTriangle size={13} /> Aucune station créée. Un administrateur doit d'abord en ajouter une.
-              </p>
-            )}
-            <Field label="Pompe assignée (optionnel)" hint="Laissez vide pour choisir la pompe à chaque saisie.">
-              <PompeSelect pompes={db.pompes} stationId={stationId} value={pompeId} onChange={setPompeId} />
-            </Field>
-          </div>
+          <p className="text-xs mb-3" style={{ color: C.textFaint }}>
+            Votre compte est créé par un administrateur depuis l'onglet Stations. Entrez ci-dessous le nom et le mot de passe qu'il vous a communiqués.
+          </p>
         )}
 
         {role === "pompiste" && (
@@ -692,8 +682,8 @@ function RoleGate({ db, onSet }) {
           </p>
         )}
 
-        <Field label={role === "pompiste" ? "Nom d'utilisateur" : "Votre nom"} hint={role === "pompiste" ? undefined : "Utilisé pour identifier vos saisies dans le journal."}>
-          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={name} onChange={(e) => setName(e.target.value)} placeholder={role === "pompiste" ? "ex : Ibrahima Kaba" : "ex : Mamadou Diallo"} />
+        <Field label={(role === "pompiste" || role === "gerant") ? "Nom d'utilisateur" : "Votre nom"} hint={(role === "pompiste" || role === "gerant") ? undefined : "Utilisé pour identifier vos saisies dans le journal."}>
+          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={name} onChange={(e) => setName(e.target.value)} placeholder={(role === "pompiste" || role === "gerant") ? "ex : Mamadou Diallo" : "ex : Mamadou Diallo"} />
         </Field>
 
         {role === "admin" && (
@@ -702,16 +692,7 @@ function RoleGate({ db, onSet }) {
           </Field>
         )}
 
-        {role === "gerant" && stationHasPin && (
-          <Field label="Code PIN de la station">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
-          </Field>
-        )}
-        {role === "gerant" && stationId && !stationHasPin && (
-          <p className="text-xs mb-2" style={{ color: C.textFaint }}>Aucun code PIN défini pour cette station — accès libre (un administrateur peut en définir un depuis Stations).</p>
-        )}
-
-        {role === "pompiste" && (
+        {(role === "pompiste" || role === "gerant") && (
           <Field label="Mot de passe">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
           </Field>
@@ -742,6 +723,19 @@ function StationsView({ db, setDb, profile }) {
   const [pinInput, setPinInput] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Comptes gérants — un compte par personne (nom + mot de passe), au lieu d'un code PIN
+  // partagé par station. Plusieurs gérants peuvent ainsi être créés pour une même station
+  // (ex. "Gérant 1", "Gérant 2"), chacun avec ses saisies clairement identifiées dans le
+  // Journal des saisies.
+  const [acctStationId, setAcctStationId] = useState(db.stations[0]?.id || "");
+  const [acctPompeId, setAcctPompeId] = useState("");
+  const [acctNom, setAcctNom] = useState("");
+  const [acctPassword, setAcctPassword] = useState("");
+  const [acctErr, setAcctErr] = useState("");
+  const [resettingId, setResettingId] = useState(null);
+  const [newPassInput, setNewPassInput] = useState("");
+  const [resetErr, setResetErr] = useState("");
+
   const save = () => {
     if (!form.nom?.trim()) return;
     setSaving(true);
@@ -768,6 +762,38 @@ function StationsView({ db, setDb, profile }) {
     setDb(next);
   };
 
+  const createGerantAccount = () => {
+    setAcctErr("");
+    if (!acctStationId) { setAcctErr("Choisissez une station."); return; }
+    if (!acctNom.trim()) { setAcctErr("Indiquez le nom du gérant."); return; }
+    if (acctPassword.trim().length < 4) { setAcctErr("Le mot de passe doit faire au moins 4 caractères."); return; }
+    const row = { id: uid(), stationId: acctStationId, pompeId: acctPompeId || null, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
+    let next = { ...db, gerants: [...(db.gerants || []), row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acctStationId, entity: "gerant_compte", action: "création", after: { nom: row.nom } });
+    setDb(next);
+    setAcctNom(""); setAcctPassword(""); setAcctPompeId("");
+  };
+
+  // Réinitialise uniquement le mot de passe d'un compte — nom, station et pompe assignée
+  // restent inchangés, aucune autre donnée n'est touchée.
+  const resetGerantPassword = (acct) => {
+    setResetErr("");
+    if (newPassInput.trim().length < 4) { setResetErr("Le mot de passe doit faire au moins 4 caractères."); return; }
+    const row = { ...acct, passwordHash: hashPin(newPassInput.trim()) };
+    let next = { ...db, gerants: db.gerants.map((g) => (g.id === acct.id ? row : g)) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acct.stationId, entity: "gerant_compte", action: "modification", after: { nom: acct.nom, note: "mot de passe réinitialisé" } });
+    setDb(next);
+    setResettingId(null);
+    setNewPassInput("");
+  };
+
+  const removeGerantAccount = (acct) => {
+    if (!confirm(`Supprimer le compte de ${acct.nom} ?`)) return;
+    let next = { ...db, gerants: db.gerants.filter((g) => g.id !== acct.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acct.stationId, entity: "gerant_compte", action: "suppression", before: { nom: acct.nom } });
+    setDb(next);
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
@@ -785,7 +811,7 @@ function StationsView({ db, setDb, profile }) {
             <Field label="Fournisseur carburant"><TextInput value={form.fournisseur || ""} onChange={(e) => setForm({ ...form, fournisseur: e.target.value })} placeholder="Ex. Total Guinée" /></Field>
             <Field label="Localisation"><TextInput value={form.localisation || ""} onChange={(e) => setForm({ ...form, localisation: e.target.value })} placeholder="Ex. Conakry, Kaloum" /></Field>
             <Field label="Devise"><TextInput value={form.devise ?? "GNF"} onChange={(e) => setForm({ ...form, devise: e.target.value })} /></Field>
-            <Field label={form.pinHash ? "Changer le code PIN de la station" : "Code PIN de la station (optionnel)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver." : "Demandé au gérant à la connexion s'il est défini."}>
+            <Field label={form.pinHash ? "Changer le code PIN de la station" : "Code PIN de la station (optionnel, non utilisé pour les gérants)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver." : "Réservé à un usage futur — les gérants se connectent désormais avec un compte individuel (voir plus bas)."}>
               <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pinInput} onChange={(e) => setPinInput(e.target.value)} placeholder="••••" />
             </Field>
           </div>
@@ -800,26 +826,82 @@ function StationsView({ db, setDb, profile }) {
         <EmptyState icon={Building2} title="Aucune station" hint="Créez la première station du réseau pour commencer." />
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {db.stations.map((s) => (
-            <Card key={s.id} className="flex flex-col gap-2">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="font-semibold">{s.nom}</p>
-                  <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: C.textMuted }}><MapPin size={12} /> {s.localisation || "—"}</p>
+          {db.stations.map((s) => {
+            const gerantsDeCetteStation = (db.gerants || []).filter((g) => g.stationId === s.id);
+            return (
+              <Card key={s.id} className="flex flex-col gap-2">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="font-semibold">{s.nom}</p>
+                    <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: C.textMuted }}><MapPin size={12} /> {s.localisation || "—"}</p>
+                  </div>
+                  <Pill tone="amber">{s.devise || "GNF"}</Pill>
                 </div>
-                <Pill tone="amber">{s.devise || "GNF"}</Pill>
-              </div>
-              <p className="text-xs" style={{ color: C.textFaint }}>Fournisseur : {s.fournisseur || "—"}</p>
-              <p className="text-xs" style={{ color: C.textFaint }}>{db.pompes.filter((p) => p.stationId === s.id).length} pompe(s)</p>
-              <p className="text-xs flex items-center gap-1" style={{ color: s.pinHash ? C.success : C.textFaint }}><Lock size={11} /> {s.pinHash ? "Code PIN activé" : "Aucun code PIN"}</p>
-              <div className="flex gap-2 mt-1">
-                <Button variant="ghost" onClick={() => setForm(s)}><Pencil size={14} /> Modifier</Button>
-                <Button variant="danger" onClick={() => remove(s.id)}><Trash2 size={14} /></Button>
-              </div>
-            </Card>
-          ))}
+                <p className="text-xs" style={{ color: C.textFaint }}>Fournisseur : {s.fournisseur || "—"}</p>
+                <p className="text-xs" style={{ color: C.textFaint }}>{db.pompes.filter((p) => p.stationId === s.id).length} pompe(s)</p>
+                <div className="text-xs" style={{ color: C.textFaint }}>
+                  {gerantsDeCetteStation.length === 0 ? (
+                    <span>Aucun gérant enregistré</span>
+                  ) : (
+                    gerantsDeCetteStation.map((g, i) => (
+                      <p key={g.id} className="flex items-center gap-1"><Users size={11} /> Gérant {i + 1} : {g.nom}</p>
+                    ))
+                  )}
+                </div>
+                <div className="flex gap-2 mt-1">
+                  <Button variant="ghost" onClick={() => setForm(s)}><Pencil size={14} /> Modifier</Button>
+                  <Button variant="danger" onClick={() => remove(s.id)}><Trash2 size={14} /></Button>
+                </div>
+              </Card>
+            );
+          })}
         </div>
       )}
+
+      <Card className="max-w-md">
+        <p className="font-semibold text-sm mb-1">Comptes gérants</p>
+        <p className="text-xs mb-3" style={{ color: C.textMuted }}>Créez un compte par personne — plusieurs gérants peuvent être créés pour une même station (Gérant 1, Gérant 2...), chacun avec son propre nom et mot de passe.</p>
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Station"><StationSelect stations={db.stations} value={acctStationId} onChange={setAcctStationId} /></Field>
+          <Field label="Nom du gérant">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={acctNom} onChange={(e) => setAcctNom(e.target.value)} placeholder="ex : Mamadou Diallo" />
+          </Field>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Mot de passe (4 caractères minimum)">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={acctPassword} onChange={(e) => setAcctPassword(e.target.value)} placeholder="••••" />
+          </Field>
+          <Field label="Pompe assignée (optionnel)" hint="Laissez vide pour choisir la pompe à chaque saisie.">
+            <PompeSelect pompes={db.pompes} stationId={acctStationId} value={acctPompeId} onChange={setAcctPompeId} />
+          </Field>
+        </div>
+        {acctErr && <p className="text-xs flex items-center gap-1.5 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {acctErr}</p>}
+        <div className="flex justify-end"><Button onClick={createGerantAccount}><Plus size={15} /> Créer le compte</Button></div>
+
+        {db.gerants?.length > 0 && (
+          <div className="flex flex-col gap-1.5 mt-4 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
+            <p className="text-xs font-semibold mb-1" style={{ color: C.textMuted }}>Tous les comptes gérants</p>
+            {db.gerants.map((acct) => (
+              <div key={acct.id} className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.stations.find((s) => s.id === acct.stationId)?.nom || "—"}</span></span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => { setResettingId(resettingId === acct.id ? null : acct.id); setResetErr(""); setNewPassInput(""); }} className="smi-btn" style={{ color: C.teal }}><Lock size={13} /></button>
+                    <button onClick={() => removeGerantAccount(acct)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+                {resettingId === acct.id && (
+                  <div className="rounded-md p-2 flex items-center gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <input className="smi-input flex-1 rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={newPassInput} onChange={(e) => setNewPassInput(e.target.value)} placeholder="Nouveau mot de passe" />
+                    <Button onClick={() => resetGerantPassword(acct)}>Valider</Button>
+                  </div>
+                )}
+                {resettingId === acct.id && resetErr && <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={13} /> {resetErr}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -1416,6 +1498,9 @@ function MouvementsPompisteView({ db, setDb, profile }) {
   const [acctNom, setAcctNom] = useState("");
   const [acctPassword, setAcctPassword] = useState("");
   const [acctErr, setAcctErr] = useState("");
+  const [resettingId, setResettingId] = useState(null);
+  const [newPassInput, setNewPassInput] = useState("");
+  const [resetErr, setResetErr] = useState("");
 
   useEffect(() => {
     if (m.record) {
@@ -1472,6 +1557,19 @@ function MouvementsPompisteView({ db, setDb, profile }) {
     setDb(next);
   };
 
+  // Réinitialise uniquement le mot de passe d'un compte pompiste — nom et pompe assignée
+  // restent inchangés, aucune autre donnée n'est touchée.
+  const resetPompistePassword = (acct) => {
+    setResetErr("");
+    if (newPassInput.trim().length < 4) { setResetErr("Le mot de passe doit faire au moins 4 caractères."); return; }
+    const row = { ...acct, passwordHash: hashPin(newPassInput.trim()) };
+    let next = { ...db, pompistes: db.pompistes.map((p) => (p.id === acct.id ? row : p)) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acct.stationId, entity: "pompiste_compte", action: "modification", after: { nom: acct.nom, note: "mot de passe réinitialisé" } });
+    setDb(next);
+    setResettingId(null);
+    setNewPassInput("");
+  };
+
   const pompe = db.pompes.find((p) => p.id === (isPompiste ? profile.pompeId : pompeId));
   const stationAccounts = isGerant ? (db.pompistes || []).filter((p) => p.stationId === profile.stationId) : [];
 
@@ -1504,9 +1602,21 @@ function MouvementsPompisteView({ db, setDb, profile }) {
           {stationAccounts.length > 0 && (
             <div className="flex flex-col gap-1.5 mt-4 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
               {stationAccounts.map((acct) => (
-                <div key={acct.id} className="flex items-center justify-between text-xs">
-                  <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.pompes.find((p) => p.id === acct.pompeId)?.nom || "—"}</span></span>
-                  <button onClick={() => removeAccount(acct)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
+                <div key={acct.id} className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.pompes.find((p) => p.id === acct.pompeId)?.nom || "—"}</span></span>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => { setResettingId(resettingId === acct.id ? null : acct.id); setResetErr(""); setNewPassInput(""); }} className="smi-btn" style={{ color: C.teal }}><Lock size={13} /></button>
+                      <button onClick={() => removeAccount(acct)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
+                    </div>
+                  </div>
+                  {resettingId === acct.id && (
+                    <div className="rounded-md p-2 flex items-center gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                      <input className="smi-input flex-1 rounded-md px-2 py-1.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={newPassInput} onChange={(e) => setNewPassInput(e.target.value)} placeholder="Nouveau mot de passe" />
+                      <Button onClick={() => resetPompistePassword(acct)}>Valider</Button>
+                    </div>
+                  )}
+                  {resettingId === acct.id && resetErr && <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={13} /> {resetErr}</p>}
                 </div>
               ))}
             </div>
