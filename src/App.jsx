@@ -723,12 +723,12 @@ function StationsView({ db, setDb, profile }) {
   const [pinInput, setPinInput] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // Comptes gérants — un compte par personne (nom + mot de passe), au lieu d'un code PIN
-  // partagé par station. Plusieurs gérants peuvent ainsi être créés pour une même station
-  // (ex. "Gérant 1", "Gérant 2"), chacun avec ses saisies clairement identifiées dans le
-  // Journal des saisies.
+  // Comptes gérants — un compte par personne (nom + mot de passe + station), au lieu d'un
+  // code PIN partagé par station. Plusieurs gérants peuvent ainsi être créés pour une même
+  // station (ex. "Gérant 1", "Gérant 2"), chacun avec ses saisies clairement identifiées
+  // dans le Journal des saisies. La pompe se choisit à chaque saisie dans Relevé Pompes,
+  // pas ici — un gérant gère toute sa station, pas une seule pompe.
   const [acctStationId, setAcctStationId] = useState(db.stations[0]?.id || "");
-  const [acctPompeId, setAcctPompeId] = useState("");
   const [acctNom, setAcctNom] = useState("");
   const [acctPassword, setAcctPassword] = useState("");
   const [acctErr, setAcctErr] = useState("");
@@ -767,11 +767,11 @@ function StationsView({ db, setDb, profile }) {
     if (!acctStationId) { setAcctErr("Choisissez une station."); return; }
     if (!acctNom.trim()) { setAcctErr("Indiquez le nom du gérant."); return; }
     if (acctPassword.trim().length < 4) { setAcctErr("Le mot de passe doit faire au moins 4 caractères."); return; }
-    const row = { id: uid(), stationId: acctStationId, pompeId: acctPompeId || null, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
+    const row = { id: uid(), stationId: acctStationId, pompeId: null, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
     let next = { ...db, gerants: [...(db.gerants || []), row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acctStationId, entity: "gerant_compte", action: "création", after: { nom: row.nom } });
     setDb(next);
-    setAcctNom(""); setAcctPassword(""); setAcctPompeId("");
+    setAcctNom(""); setAcctPassword("");
   };
 
   // Réinitialise uniquement le mot de passe d'un compte — nom, station et pompe assignée
@@ -867,16 +867,11 @@ function StationsView({ db, setDb, profile }) {
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={acctNom} onChange={(e) => setAcctNom(e.target.value)} placeholder="ex : Mamadou Diallo" />
           </Field>
         </div>
-        <div className="grid sm:grid-cols-2 gap-3 mb-3">
-          <Field label="Mot de passe (4 caractères minimum)">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={acctPassword} onChange={(e) => setAcctPassword(e.target.value)} placeholder="••••" />
-          </Field>
-          <Field label="Pompe assignée (optionnel)" hint="Laissez vide pour choisir la pompe à chaque saisie.">
-            <PompeSelect pompes={db.pompes} stationId={acctStationId} value={acctPompeId} onChange={setAcctPompeId} />
-          </Field>
-        </div>
-        {acctErr && <p className="text-xs flex items-center gap-1.5 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {acctErr}</p>}
-        <div className="flex justify-end"><Button onClick={createGerantAccount}><Plus size={15} /> Créer le compte</Button></div>
+        <Field label="Mot de passe (4 caractères minimum)">
+          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={acctPassword} onChange={(e) => setAcctPassword(e.target.value)} placeholder="••••" />
+        </Field>
+        {acctErr && <p className="text-xs flex items-center gap-1.5 mt-2 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {acctErr}</p>}
+        <div className="flex justify-end mt-3"><Button onClick={createGerantAccount}><Plus size={15} /> Créer le compte</Button></div>
 
         {db.gerants?.length > 0 && (
           <div className="flex flex-col gap-1.5 mt-4 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
@@ -1114,7 +1109,7 @@ function RelevePompesView({ db, setDb, profile }) {
         <div className="grid sm:grid-cols-4 gap-3">
           <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
-          <Field label="Pompe"><PompeSelect pompes={db.pompes} stationId={stationId} value={pompeId} onChange={setPompeId} disabled={isGerant && !!profile.pompeId} /></Field>
+          <Field label="Pompe"><PompeSelect pompes={db.pompes} stationId={stationId} value={pompeId} onChange={setPompeId} /></Field>
           <div className="flex items-end">{existing && <Pill tone="teal">Relevé existant — modification</Pill>}</div>
         </div>
 
