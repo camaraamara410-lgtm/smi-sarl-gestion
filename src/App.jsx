@@ -54,6 +54,10 @@ const FONTS = `
   .smi-no-print { display: none !important; }
   .smi-print-only { display: block !important; }
   .smi-print-area, .smi-print-area * { background: #fff !important; color: #111 !important; border-color: #ccc !important; box-shadow: none !important; }
+  /* Les vignettes de preuve (reçu, bon) doivent rester lisibles une fois imprimées —
+     une miniature de 40px à l'écran ne sert à rien sur papier. */
+  .smi-print-photo { width: 220px !important; height: 220px !important; object-fit: contain !important; display: block !important; margin: 6px 0 !important; }
+  .smi-print-photo-row { flex-direction: column !important; align-items: flex-start !important; }
 }
 `;
 
@@ -1748,6 +1752,7 @@ function VersementView({ db, setDb, profile }) {
   const [banqueNom, setBanqueNom] = useState("");
   const [banqueMontant, setBanqueMontant] = useState("");
   const [banquePhoto, setBanquePhoto] = useState(null);
+  const [recuNumero, setRecuNumero] = useState("");
   const [paiementMarchandMontant, setPaiementMarchandMontant] = useState("");
   const [autreMontant, setAutreMontant] = useState("");
   const [autreLibelle, setAutreLibelle] = useState("");
@@ -1772,7 +1777,7 @@ function VersementView({ db, setDb, profile }) {
   };
 
   const reset = () => {
-    setBanqueNom(""); setBanqueMontant(""); setBanquePhoto(null);
+    setBanqueNom(""); setBanqueMontant(""); setBanquePhoto(null); setRecuNumero("");
     setPaiementMarchandMontant(""); setAutreMontant(""); setAutreLibelle(""); setEditingId(null);
   };
 
@@ -1785,6 +1790,7 @@ function VersementView({ db, setDb, profile }) {
     setBanqueNom(v.banqueNom || "");
     setBanqueMontant(v.banqueMontant ?? "");
     setBanquePhoto(v.banquePhoto || null);
+    setRecuNumero(v.recuNumero || "");
     setPaiementMarchandMontant(v.paiementMarchandMontant ?? "");
     setAutreMontant(v.autreMontant ?? "");
     setAutreLibelle(v.autreLibelle || "");
@@ -1798,7 +1804,7 @@ function VersementView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez au moins un montant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.versements.find((x) => x.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, paiementMarchandMontant, autreMontant, autreLibelle, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, versements: editingId ? db.versements.map((x) => (x.id === editingId ? row : x)) : [...db.versements, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "versement", action: editingId ? "modification" : "création", before: existing ? { date: existing.date } : null, after: { date, banqueNom, total } });
     setDb(next);
@@ -1870,6 +1876,9 @@ function VersementView({ db, setDb, profile }) {
               <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={banqueNom} onChange={(e) => setBanqueNom(e.target.value)} placeholder="ex : BNG" />
             </Field>
             <Field label={`Montant (${devise})`}><NumberInput value={banqueMontant} onChange={(e) => setBanqueMontant(e.target.value)} /></Field>
+            <Field label="N° de reçu">
+              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={recuNumero} onChange={(e) => setRecuNumero(e.target.value)} placeholder="ex : REC-004821" />
+            </Field>
             <Field label="Capture du reçu">
               <label className="smi-btn flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm cursor-pointer" style={{ background: C.bgAlt, border: `1px dashed ${C.border}`, color: C.textMuted }}>
                 <Camera size={18} />
@@ -1942,20 +1951,21 @@ function VersementView({ db, setDb, profile }) {
                       {g.entries.map((v) => {
                         const vTotal = versementTotal(v);
                         return (
-                          <div key={v.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                          <div key={v.id} className="rounded-md p-2.5 flex items-center gap-3 smi-print-photo-row" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                             {v.banquePhoto ? (
-                              <img src={v.banquePhoto} alt="" className="rounded-md flex-shrink-0 cursor-pointer" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(v.banquePhoto)} />
+                              <img src={v.banquePhoto} alt="" className="rounded-md flex-shrink-0 cursor-pointer smi-print-photo" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(v.banquePhoto)} />
                             ) : (
                               <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Landmark size={16} /></div>
                             )}
                             <div className="flex-1 min-w-0 text-xs flex flex-col gap-0.5" style={{ color: C.textMuted }}>
                               {num(v.banqueMontant) > 0 && <span>Bancaire{v.banqueNom ? ` (${v.banqueNom})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.banqueMontant, dv)}</span></span>}
+                              {v.recuNumero && <span>N° de reçu : <span className="smi-mono" style={{ color: C.text }}>{v.recuNumero}</span></span>}
                               {num(v.paiementMarchandMontant) > 0 && <span>Paiement marchand : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.paiementMarchandMontant, dv)}</span></span>}
                               {num(v.autreMontant) > 0 && <span>Autre versement{v.autreLibelle ? ` (${v.autreLibelle})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
                             </div>
                             <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(vTotal, dv)}</span>
-                            <button onClick={() => startEdit(v)} className="smi-btn flex-shrink-0" style={{ color: C.teal }}><Pencil size={13} /></button>
-                            {!isGerant && <button onClick={() => removeVersement(v)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={13} /></button>}
+                            <button onClick={() => startEdit(v)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
+                            {!isGerant && <button onClick={() => removeVersement(v)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.danger }}><Trash2 size={13} /></button>}
                           </div>
                         );
                       })}
@@ -2172,9 +2182,9 @@ function BonsView({ db, setDb, profile }) {
                   {open && (
                     <div className="px-3 pb-3 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
                       {g.entries.map((b) => (
-                        <div key={b.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                        <div key={b.id} className="rounded-md p-2.5 flex items-center gap-3 smi-print-photo-row" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
                           {b.photo ? (
-                            <img src={b.photo} alt="" className="rounded-md flex-shrink-0 cursor-pointer" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(b.photo)} />
+                            <img src={b.photo} alt="" className="rounded-md flex-shrink-0 cursor-pointer smi-print-photo" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(b.photo)} />
                           ) : (
                             <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Wallet size={16} /></div>
                           )}
@@ -2184,8 +2194,8 @@ function BonsView({ db, setDb, profile }) {
                             {num(b.fraisRoute) > 0 && <span> · Frais : {fmtMontant(b.fraisRoute, dv)}</span>}
                           </div>
                           <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(bonTotal(b), dv)}</span>
-                          <button onClick={() => startEdit(b)} className="smi-btn flex-shrink-0" style={{ color: C.teal }}><Pencil size={13} /></button>
-                          {!isGerant && <button onClick={() => removeBon(b)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={13} /></button>}
+                          <button onClick={() => startEdit(b)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
+                          {!isGerant && <button onClick={() => removeBon(b)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.danger }}><Trash2 size={13} /></button>}
                         </div>
                       ))}
                     </div>
@@ -3070,7 +3080,7 @@ function RapportJournalierView({ db, profile }) {
                           <td className="py-1 text-right smi-mono">{fmtMontant(b.prixUnitaire, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(b.fraisRoute, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute), devise)}</td>
-                          <td className="py-1 text-center">{b.photo ? <img src={b.photo} alt="" style={{ width: 36, height: 36, objectFit: "cover", display: "inline-block" }} /> : "—"}</td>
+                          <td className="py-1 text-center">{b.photo ? <img src={b.photo} alt="" className="smi-print-photo" style={{ width: 36, height: 36, objectFit: "cover", display: "inline-block" }} /> : "—"}</td>
                         </tr>
                       ))}
                       {caisseJour.bons.length === 0 && <tr><td colSpan={6} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
@@ -3101,12 +3111,12 @@ function RapportJournalierView({ db, profile }) {
                     <tbody>
                       {caisseJour.versements.map((v) => (
                         <tr key={v.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                          <td className="py-1">{v.banqueNom || v.autreLibelle || "—"}</td>
+                          <td className="py-1">{v.banqueNom || v.autreLibelle || "—"}{v.recuNumero ? ` (reçu n° ${v.recuNumero})` : ""}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(v.banqueMontant, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(v.paiementMarchandMontant, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(v.autreMontant, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(versementTotal(v), devise)}</td>
-                          <td className="py-1 text-center">{v.banquePhoto ? <img src={v.banquePhoto} alt="" style={{ width: 36, height: 36, objectFit: "cover", display: "inline-block" }} /> : "—"}</td>
+                          <td className="py-1 text-center">{v.banquePhoto ? <img src={v.banquePhoto} alt="" className="smi-print-photo" style={{ width: 36, height: 36, objectFit: "cover", display: "inline-block" }} /> : "—"}</td>
                         </tr>
                       ))}
                       {caisseJour.versements.length === 0 && <tr><td colSpan={6} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
