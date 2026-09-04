@@ -748,9 +748,17 @@ function StationsView({ db, setDb, profile }) {
     if (pinInput.trim()) record.pinHash = hashPin(pinInput.trim());
     if (!record.id) record.id = uid();
     let next = { ...db };
-    if (before) next.stations = db.stations.map((s) => (s.id === record.id ? record : s));
-    else next.stations = [...db.stations, record];
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: record.id, entity: "station", action: before ? "modification" : "création", before: before ? { nom: before.nom } : null, after: { nom: record.nom } });
+    if (before) {
+      next.stations = db.stations.map((s) => (s.id === record.id ? record : s));
+    } else {
+      next.stations = [...db.stations, record];
+      // Toute station a forcément des pompes — on en pré-crée 4 (P1 à P4) pour éviter
+      // l'étape oubliée « aucune pompe ». L'admin peut toujours en ajouter une 5ᵉ, 6ᵉ...
+      // depuis l'onglet Pompes, ou supprimer celles qui ne servent pas.
+      const nouvellesPompes = [1, 2, 3, 4].map((n) => ({ id: uid(), stationId: record.id, nom: `P${n}`, produits: ["essence", "gasoil"] }));
+      next.pompes = [...db.pompes, ...nouvellesPompes];
+    }
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: record.id, entity: "station", action: before ? "modification" : "création", before: before ? { nom: before.nom } : null, after: { nom: record.nom, pompesCreees: before ? undefined : 4 } });
     setDb(next);
     setSaving(false);
     setForm(null);
@@ -810,6 +818,11 @@ function StationsView({ db, setDb, profile }) {
 
       {form && (
         <Card>
+          {!form.id && (
+            <p className="text-xs mb-3 flex items-center gap-1.5" style={{ color: C.textMuted }}>
+              <Gauge size={13} /> 4 pompes (P1 à P4) seront créées automatiquement avec cette station — ajoutez-en d'autres ou supprimez-en depuis l'onglet Pompes.
+            </p>
+          )}
           <div className="grid sm:grid-cols-2 gap-3">
             <Field label="Nom de la station"><TextInput value={form.nom || ""} onChange={(e) => setForm({ ...form, nom: e.target.value })} placeholder="Ex. SMI Kaloum" /></Field>
             <Field label="Fournisseur carburant"><TextInput value={form.fournisseur || ""} onChange={(e) => setForm({ ...form, fournisseur: e.target.value })} placeholder="Ex. Total Guinée" /></Field>
