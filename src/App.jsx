@@ -1838,15 +1838,20 @@ function VersementView({ db, setDb, profile }) {
   // Cumul automatique sur toute la période affichée — recalculé dès qu'un versement est
   // ajouté ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
   const cumulTotal = history.reduce((a, v) => a + versementTotal(v), 0);
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const exportPdf = () => window.print();
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="smi-display text-2xl flex items-center gap-2"><Landmark size={22} /> Versement</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des dépôts du jour : versement bancaire, paiement marchand, autre versement.</p>
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
+        <div>
+          <h2 className="smi-display text-2xl flex items-center gap-2"><Landmark size={22} /> Versement</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des dépôts du jour : versement bancaire, paiement marchand, autre versement.</p>
+        </div>
+        <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
       </div>
 
-      <Card className="max-w-md">
+      <Card className="max-w-md smi-no-print">
         {editingId && (
           <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
             <span className="text-xs" style={{ color: C.teal }}>Modification d'un versement existant</span>
@@ -1868,8 +1873,8 @@ function VersementView({ db, setDb, profile }) {
             <Field label="Capture du reçu">
               <label className="smi-btn flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm cursor-pointer" style={{ background: C.bgAlt, border: `1px dashed ${C.border}`, color: C.textMuted }}>
                 <Camera size={18} />
-                {banquePhoto ? "Reprendre la photo" : "Prendre une photo"}
-                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onPhotoChange} />
+                {banquePhoto ? "Changer la photo" : "Ajouter une photo (caméra ou galerie)"}
+                <input type="file" accept="image/*" className="hidden" onChange={onPhotoChange} />
               </label>
               {banquePhoto && (
                 <div className="mt-2">
@@ -1900,7 +1905,11 @@ function VersementView({ db, setDb, profile }) {
         </div>
       </Card>
 
-      <Card>
+      <Card className="smi-print-area">
+        <div className="hidden smi-print-only mb-3">
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Historique des versements</h1>
+          <p style={{ fontSize: 13, color: "#444" }}>{station?.nom || "Toutes stations"}</p>
+        </div>
         <p className="font-semibold text-sm mb-3">Historique des versements</p>
         {grouped.length > 0 && (
           <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
@@ -1958,6 +1967,15 @@ function VersementView({ db, setDb, profile }) {
           </div>
         )}
       </Card>
+      <div className="hidden smi-print-only" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <QrCode value={appUrl} size={64} />
+          <div>
+            <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+            <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+          </div>
+        </div>
+      </div>
       <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
@@ -1973,16 +1991,29 @@ function BonsView({ db, setDb, profile }) {
   const [quantite, setQuantite] = useState("");
   const [prixUnitaire, setPrixUnitaire] = useState("");
   const [fraisRoute, setFraisRoute] = useState("");
+  const [photo, setPhoto] = useState(null);
   const [err, setErr] = useState("");
   const [expandedDate, setExpandedDate] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [lightbox, setLightbox] = useState(null);
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
 
   const total = num(quantite) * num(prixUnitaire) + num(fraisRoute);
 
+  const onPhotoChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImage(file);
+      setPhoto(dataUrl);
+    } catch {
+      setErr("Impossible de lire la photo.");
+    }
+  };
+
   const reset = () => {
-    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setEditingId(null);
+    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null);
   };
 
   // Charge une ligne existante dans le formulaire pour la corriger — plus besoin de
@@ -1995,6 +2026,7 @@ function BonsView({ db, setDb, profile }) {
     setQuantite(b.quantite ?? "");
     setPrixUnitaire(b.prixUnitaire ?? "");
     setFraisRoute(b.fraisRoute ?? "");
+    setPhoto(b.photo || null);
     setEditingId(b.id);
   };
 
@@ -2006,7 +2038,7 @@ function BonsView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez une quantité et un prix, ou des frais de route."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.bons.find((b) => b.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, bons: editingId ? db.bons.map((b) => (b.id === editingId ? row : b)) : [...db.bons, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "bon", action: editingId ? "modification" : "création", before: existing ? { libelle: existing.libelle, date: existing.date } : null, after: { date, libelle: row.libelle, total } });
     setDb(next);
@@ -2045,15 +2077,20 @@ function BonsView({ db, setDb, profile }) {
   // Cumul automatique sur toute la période affichée — recalculé dès qu'un bon est ajouté
   // ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
   const cumulTotal = history.reduce((a, b) => a + bonTotal(b), 0);
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const exportPdf = () => window.print();
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="smi-display text-2xl">Bons</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des bons de carburant (non payés en espèces).</p>
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
+        <div>
+          <h2 className="smi-display text-2xl">Bons</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des bons de carburant (non payés en espèces).</p>
+        </div>
+        <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
       </div>
 
-      <Card className="max-w-md">
+      <Card className="max-w-md smi-no-print">
         {editingId && (
           <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
             <span className="text-xs" style={{ color: C.teal }}>Modification d'un bon existant</span>
@@ -2074,6 +2111,18 @@ function BonsView({ db, setDb, profile }) {
             <Field label={`Prix unitaire (${devise})`}><NumberInput value={prixUnitaire} onChange={(e) => setPrixUnitaire(e.target.value)} /></Field>
             <Field label={`Frais de route (${devise})`}><NumberInput value={fraisRoute} onChange={(e) => setFraisRoute(e.target.value)} /></Field>
           </div>
+          <Field label="Photo du bon (optionnel)">
+            <label className="smi-btn flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm cursor-pointer" style={{ background: C.bgAlt, border: `1px dashed ${C.border}`, color: C.textMuted }}>
+              <Camera size={18} />
+              {photo ? "Changer la photo" : "Ajouter une photo (caméra ou galerie)"}
+              <input type="file" accept="image/*" className="hidden" onChange={onPhotoChange} />
+            </label>
+            {photo && (
+              <div className="mt-2">
+                <img src={photo} alt="Bon" className="rounded-md cursor-pointer" style={{ maxHeight: 140, border: `1px solid ${C.border}` }} onClick={() => setLightbox(photo)} />
+              </div>
+            )}
+          </Field>
         </div>
 
         <div className="rounded-md p-3 mt-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
@@ -2088,7 +2137,11 @@ function BonsView({ db, setDb, profile }) {
         </div>
       </Card>
 
-      <Card>
+      <Card className="smi-print-area">
+        <div className="hidden smi-print-only mb-3">
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Historique des bons</h1>
+          <p style={{ fontSize: 13, color: "#444" }}>{isGerant ? station?.nom : (station?.nom || "Toutes stations")}</p>
+        </div>
         <p className="font-semibold text-sm mb-3">Historique des bons</p>
         {grouped.length > 0 && (
           <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
@@ -2120,6 +2173,11 @@ function BonsView({ db, setDb, profile }) {
                     <div className="px-3 pb-3 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
                       {g.entries.map((b) => (
                         <div key={b.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                          {b.photo ? (
+                            <img src={b.photo} alt="" className="rounded-md flex-shrink-0 cursor-pointer" style={{ width: 40, height: 40, objectFit: "cover", border: `1px solid ${C.border}` }} onClick={() => setLightbox(b.photo)} />
+                          ) : (
+                            <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Wallet size={16} /></div>
+                          )}
                           <div className="flex-1 min-w-0 text-xs" style={{ color: C.textMuted }}>
                             <span className="font-medium" style={{ color: C.text }}>{b.libelle}</span>
                             {num(b.quantite) > 0 && <span> · {fmtVol(b.quantite)} × {fmtMontant(b.prixUnitaire, dv)}</span>}
@@ -2138,6 +2196,16 @@ function BonsView({ db, setDb, profile }) {
           </div>
         )}
       </Card>
+      <div className="hidden smi-print-only" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <QrCode value={appUrl} size={64} />
+          <div>
+            <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+            <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+          </div>
+        </div>
+      </div>
+      <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
 }
@@ -2214,15 +2282,20 @@ function ReceptionView({ db, setDb, profile }) {
   // puisqu'il est dérivé directement de la liste affichée.
   const cumulEssence = history.filter((r) => r.produit === "essence").reduce((a, r) => a + num(r.quantite), 0);
   const cumulGasoil = history.filter((r) => r.produit === "gasoil").reduce((a, r) => a + num(r.quantite), 0);
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const exportPdf = () => window.print();
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="smi-display text-2xl flex items-center gap-2"><Truck size={22} /> Réception</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement d'une livraison de carburant, avec photo du bon comme preuve.</p>
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
+        <div>
+          <h2 className="smi-display text-2xl flex items-center gap-2"><Truck size={22} /> Réception</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement d'une livraison de carburant, avec photo du bon comme preuve.</p>
+        </div>
+        <Button variant="ghost" onClick={exportPdf} disabled={history.length === 0}><Printer size={16} /> Exporter en PDF</Button>
       </div>
 
-      <Card className="max-w-md">
+      <Card className="max-w-md smi-no-print">
         {editingId && (
           <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
             <span className="text-xs" style={{ color: C.teal }}>Modification d'une réception existante</span>
@@ -2251,8 +2324,8 @@ function ReceptionView({ db, setDb, profile }) {
           <Field label="Photo du bon">
             <label className="smi-btn flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm cursor-pointer" style={{ background: C.panelAlt, border: `1px dashed ${C.border}`, color: C.textMuted }}>
               <Camera size={18} />
-              {photo ? "Reprendre la photo" : "Prendre une photo"}
-              <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onPhotoChange} />
+              {photo ? "Changer la photo" : "Ajouter une photo (caméra ou galerie)"}
+              <input type="file" accept="image/*" className="hidden" onChange={onPhotoChange} />
             </label>
             {photo && (
               <div className="mt-2">
@@ -2269,7 +2342,11 @@ function ReceptionView({ db, setDb, profile }) {
         </div>
       </Card>
 
-      <Card>
+      <Card className="smi-print-area">
+        <div className="hidden smi-print-only mb-3">
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Historique des réceptions</h1>
+          <p style={{ fontSize: 13, color: "#444" }}>{db.stations.find((s) => s.id === stationId)?.nom || "Toutes stations"}</p>
+        </div>
         <p className="font-semibold text-sm mb-3">Historique des réceptions</p>
         {history.length > 0 && (
           <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
@@ -2302,6 +2379,15 @@ function ReceptionView({ db, setDb, profile }) {
           </div>
         )}
       </Card>
+      <div className="hidden smi-print-only" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <QrCode value={appUrl} size={64} />
+          <div>
+            <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+            <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+          </div>
+        </div>
+      </div>
       <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
     </div>
   );
@@ -2973,6 +3059,7 @@ function RapportJournalierView({ db, profile }) {
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Prix unitaire ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Frais de route ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
+                        <th className="text-center py-1" style={{ color: C.textMuted }}>Photo</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2983,14 +3070,16 @@ function RapportJournalierView({ db, profile }) {
                           <td className="py-1 text-right smi-mono">{fmtMontant(b.prixUnitaire, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(b.fraisRoute, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute), devise)}</td>
+                          <td className="py-1 text-center">{b.photo ? <img src={b.photo} alt="" style={{ width: 36, height: 36, objectFit: "cover", display: "inline-block" }} /> : "—"}</td>
                         </tr>
                       ))}
-                      {caisseJour.bons.length === 0 && <tr><td colSpan={5} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
+                      {caisseJour.bons.length === 0 && <tr><td colSpan={6} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
                     </tbody>
                     <tfoot>
                       <tr style={{ borderTop: `1px solid ${C.border}` }}>
                         <td colSpan={4} className="py-1 font-bold">Total Bons</td>
                         <td className="py-1 text-right smi-mono font-bold">{fmtMontant(caisseJour.totalBon, devise)}</td>
+                        <td></td>
                       </tr>
                     </tfoot>
                   </table>
@@ -3006,6 +3095,7 @@ function RapportJournalierView({ db, profile }) {
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Paiement marchand ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Autre versement ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
+                        <th className="text-center py-1" style={{ color: C.textMuted }}>Photo</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3016,14 +3106,16 @@ function RapportJournalierView({ db, profile }) {
                           <td className="py-1 text-right smi-mono">{fmtMontant(v.paiementMarchandMontant, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(v.autreMontant, devise)}</td>
                           <td className="py-1 text-right smi-mono">{fmtMontant(versementTotal(v), devise)}</td>
+                          <td className="py-1 text-center">{v.banquePhoto ? <img src={v.banquePhoto} alt="" style={{ width: 36, height: 36, objectFit: "cover", display: "inline-block" }} /> : "—"}</td>
                         </tr>
                       ))}
-                      {caisseJour.versements.length === 0 && <tr><td colSpan={5} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
+                      {caisseJour.versements.length === 0 && <tr><td colSpan={6} className="py-2 text-center" style={{ color: C.textFaint }}>Aucune ligne.</td></tr>}
                     </tbody>
                     <tfoot>
                       <tr style={{ borderTop: `1px solid ${C.border}` }}>
                         <td colSpan={4} className="py-1 font-bold">Total Versement</td>
                         <td className="py-1 text-right smi-mono font-bold">{fmtMontant(caisseJour.totalVersement, devise)}</td>
+                        <td></td>
                       </tr>
                     </tfoot>
                   </table>
