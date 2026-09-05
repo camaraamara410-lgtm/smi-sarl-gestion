@@ -510,13 +510,32 @@ function Pill({ children, tone = "muted" }) {
 // Visionneuse plein écran pour les photos (bon de livraison, reçu de versement...) — clic
 // sur une vignette pour voir la photo en grand, clic n'importe où (ou sur la croix) pour
 // fermer.
+// Visionneuse plein écran pour les photos (bon de livraison, reçu de versement...) — clic
+// sur une vignette pour voir la photo en grand, clic n'importe où (ou sur la croix) pour
+// fermer. Le bouton Imprimer ouvre la photo seule dans un nouvel onglet dédié à
+// l'impression — indépendant du reste de la page (Rapport journalier, historique...), pour
+// que l'impression ne contienne que cette photo, rien d'autre.
 function ImageLightbox({ src, onClose }) {
   if (!src) return null;
+
+  const printPhoto = () => {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(`<!DOCTYPE html><html><head><title>Photo</title><meta charset="utf-8"></head>
+      <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff;">
+        <img src="${src}" style="max-width:100%;max-height:100vh;" onload="window.print()" />
+      </body></html>`);
+    w.document.close();
+  };
+
   return (
     <div
       onClick={onClose}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
     >
+      <button onClick={(e) => { e.stopPropagation(); printPhoto(); }} className="smi-btn" style={{ position: "absolute", top: 16, right: 64, color: "#fff" }} aria-label="Imprimer">
+        <Printer size={26} />
+      </button>
       <button onClick={onClose} className="smi-btn" style={{ position: "absolute", top: 16, right: 16, color: "#fff" }} aria-label="Fermer">
         <X size={28} />
       </button>
