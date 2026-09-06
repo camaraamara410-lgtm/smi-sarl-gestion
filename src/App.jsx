@@ -259,11 +259,11 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
   const totalVersement = versementsDuJour.length > 0 ? versementsDuJour.reduce((a, v) => a + versementTotal(v), 0) : (c.versements ? sumVersements(versements) : num(c.totalVersement));
 
   const totalPaiementMarchand = num(c.totalPaiementMarchand);
-  // Le versement (dépôt bancaire du jour) n'entre plus dans le calcul de la caisse
-  // attendue : il ne fait que documenter où est allée une partie de la caisse déjà
-  // comptée, contrairement au Bon et au Paiement marchand qui, eux, réduisent
-  // effectivement l'argent liquide encaissé.
-  const caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand;
+  // Un gérant peut anticiper un versement en pleine journée (grosse recette du matin
+  // versée avant la fin de journée, par exemple) — cet argent sort donc réellement du
+  // tiroir le jour même. Le versement du jour se déduit désormais de la caisse attendue,
+  // au même titre que le Bon et le Paiement marchand.
+  const caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand - totalVersement;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
   return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
@@ -273,8 +273,8 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -642,7 +642,7 @@ function RoleGate({ db, onSet }) {
         const h = hashPin(pin.trim());
         const acct = (db.gerants || []).find((g) => g.nom.trim().toLowerCase() === name.trim().toLowerCase() && g.passwordHash === h);
         if (!acct) { setErr("Nom ou mot de passe incorrect."); setBusy(false); return; }
-        onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId || null, name: acct.nom });
+        onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId || null, partenaireId: acct.partenaireId || null, name: acct.nom });
         return;
       }
       if (role === "admin") {
@@ -754,6 +754,7 @@ function StationsView({ db, setDb, profile }) {
   const [acctStationId, setAcctStationId] = useState(db.stations[0]?.id || "");
   const [acctNom, setAcctNom] = useState("");
   const [acctPassword, setAcctPassword] = useState("");
+  const [acctPartenaireId, setAcctPartenaireId] = useState("");
   const [acctErr, setAcctErr] = useState("");
   const [resettingId, setResettingId] = useState(null);
   const [newPassInput, setNewPassInput] = useState("");
@@ -798,11 +799,11 @@ function StationsView({ db, setDb, profile }) {
     if (!acctStationId) { setAcctErr("Choisissez une station."); return; }
     if (!acctNom.trim()) { setAcctErr("Indiquez le nom du gérant."); return; }
     if (acctPassword.trim().length < 4) { setAcctErr("Le mot de passe doit faire au moins 4 caractères."); return; }
-    const row = { id: uid(), stationId: acctStationId, pompeId: null, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
+    const row = { id: uid(), stationId: acctStationId, pompeId: null, partenaireId: acctPartenaireId || null, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
     let next = { ...db, gerants: [...(db.gerants || []), row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acctStationId, entity: "gerant_compte", action: "création", after: { nom: row.nom } });
     setDb(next);
-    setAcctNom(""); setAcctPassword("");
+    setAcctNom(""); setAcctPassword(""); setAcctPartenaireId("");
   };
 
   // Réinitialise uniquement le mot de passe d'un compte — nom, station et pompe assignée
@@ -906,6 +907,14 @@ function StationsView({ db, setDb, profile }) {
         <Field label="Mot de passe (4 caractères minimum)">
           <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={acctPassword} onChange={(e) => setAcctPassword(e.target.value)} placeholder="••••" />
         </Field>
+        <div className="mt-3">
+          <Field label="Partenaire assigné (optionnel)" hint="Donne accès à l'onglet Partenaires, verrouillé sur ce client — pour un gérant chargé du suivi d'un partenaire.">
+            <SelectInput value={acctPartenaireId} onChange={(e) => setAcctPartenaireId(e.target.value)}>
+              <option value="">Aucun</option>
+              {(db.partenaires || []).map((p) => <option key={p.id} value={p.id}>{p.nom}</option>)}
+            </SelectInput>
+          </Field>
+        </div>
         {acctErr && <p className="text-xs flex items-center gap-1.5 mt-2 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {acctErr}</p>}
         <div className="flex justify-end mt-3"><Button onClick={createGerantAccount}><Plus size={15} /> Créer le compte</Button></div>
 
@@ -915,7 +924,7 @@ function StationsView({ db, setDb, profile }) {
             {db.gerants.map((acct) => (
               <div key={acct.id} className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.stations.find((s) => s.id === acct.stationId)?.nom || "—"}</span></span>
+                  <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.stations.find((s) => s.id === acct.stationId)?.nom || "—"}{acct.partenaireId ? ` · Partenaire : ${(db.partenaires || []).find((p) => p.id === acct.partenaireId)?.nom || "—"}` : ""}</span></span>
                   <div className="flex items-center gap-2">
                     <button onClick={() => { setResettingId(resettingId === acct.id ? null : acct.id); setResetErr(""); setNewPassInput(""); }} className="smi-btn" style={{ color: C.teal }}><Lock size={13} /></button>
                     <button onClick={() => removeGerantAccount(acct)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
@@ -938,6 +947,317 @@ function StationsView({ db, setDb, profile }) {
 }
 
 /* ------------------------------- Pompes view ------------------------------ */
+
+/* ------------------------------- Partenaires view ------------------------------ */
+
+// Client partenaire non intégré au contrôle strict du réseau (pas de relevé pompes, pas
+// de stock, pas de caisse) — juste un suivi Commandes + Versements, comme les feuilles de
+// suivi papier existantes.
+function bonComTotal(c) { return num(c.quantiteCommandee) * num(c.prixUnitaire); }
+
+function PartenairesView({ db, setDb, profile }) {
+  const isAdmin = profile.role === "admin";
+  const isGerantAssigne = profile.role === "gerant" && !!profile.partenaireId;
+
+  // Gestion des clients partenaires (admin uniquement)
+  const [newNom, setNewNom] = useState("");
+  const [newLocalisation, setNewLocalisation] = useState("");
+  const [clientErr, setClientErr] = useState("");
+  const [selectedId, setSelectedId] = useState(isGerantAssigne ? profile.partenaireId : (db.partenaires?.[0]?.id || ""));
+
+  const createClient = () => {
+    setClientErr("");
+    if (!newNom.trim()) { setClientErr("Indiquez le nom du client."); return; }
+    const row = { id: uid(), nom: newNom.trim(), localisation: newLocalisation.trim() };
+    let next = { ...db, partenaires: [...(db.partenaires || []), row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: null, entity: "partenaire", action: "création", after: { nom: row.nom } });
+    setDb(next);
+    setNewNom(""); setNewLocalisation("");
+    setSelectedId(row.id);
+  };
+
+  const removeClient = (p) => {
+    if (!confirm(`Supprimer le client ${p.nom} et tout son historique (commandes, versements) ?`)) return;
+    let next = {
+      ...db,
+      partenaires: db.partenaires.filter((x) => x.id !== p.id),
+      commandesPartenaires: db.commandesPartenaires.filter((c) => c.partenaireId !== p.id),
+      versementsPartenaires: db.versementsPartenaires.filter((v) => v.partenaireId !== p.id),
+    };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: null, entity: "partenaire", action: "suppression", before: { nom: p.nom } });
+    setDb(next);
+    if (selectedId === p.id) setSelectedId("");
+  };
+
+  // Formulaire Commande
+  const [cDate, setCDate] = useState(todayISO());
+  const [cProduit, setCProduit] = useState("essence");
+  const [cQteCommandee, setCQteCommandee] = useState("");
+  const [cQteLivree, setCQteLivree] = useState("");
+  const [cPrixUnitaire, setCPrixUnitaire] = useState("");
+  const [cErr, setCErr] = useState("");
+  const [cEditingId, setCEditingId] = useState(null);
+
+  const resetCommandeForm = () => {
+    setCDate(todayISO()); setCProduit("essence"); setCQteCommandee(""); setCQteLivree(""); setCPrixUnitaire(""); setCEditingId(null);
+  };
+
+  const startEditCommande = (c) => {
+    setCErr("");
+    setCDate(c.date); setCProduit(c.produit); setCQteCommandee(c.quantiteCommandee ?? "");
+    setCQteLivree(c.quantiteLivree ?? ""); setCPrixUnitaire(c.prixUnitaire ?? ""); setCEditingId(c.id);
+  };
+
+  const saveCommande = () => {
+    setCErr("");
+    if (!selectedId) { setCErr("Choisissez un client."); return; }
+    if (!cQteCommandee || num(cQteCommandee) <= 0) { setCErr("Indiquez une quantité commandée."); return; }
+    if (isFutureDate(cDate)) { setCErr("La date ne peut pas être dans le futur."); return; }
+    const existing = cEditingId ? db.commandesPartenaires.find((c) => c.id === cEditingId) : null;
+    const row = { id: cEditingId || uid(), partenaireId: selectedId, date: cDate, produit: cProduit, quantiteCommandee: cQteCommandee, quantiteLivree: cQteLivree, prixUnitaire: cPrixUnitaire, timestamp: existing?.timestamp || new Date().toISOString() };
+    let next = { ...db, commandesPartenaires: cEditingId ? db.commandesPartenaires.map((c) => (c.id === cEditingId ? row : c)) : [...db.commandesPartenaires, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: null, entity: "commande_partenaire", action: cEditingId ? "modification" : "création", after: { date: cDate, quantiteCommandee: cQteCommandee } });
+    setDb(next);
+    resetCommandeForm();
+  };
+
+  const removeCommande = (c) => {
+    if (!confirm("Supprimer cette commande ?")) return;
+    let next = { ...db, commandesPartenaires: db.commandesPartenaires.filter((x) => x.id !== c.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: null, entity: "commande_partenaire", action: "suppression", before: { date: c.date } });
+    setDb(next);
+    if (cEditingId === c.id) resetCommandeForm();
+  };
+
+  // Formulaire Versement
+  const [vDate, setVDate] = useState(todayISO());
+  const [vMontant, setVMontant] = useState("");
+  const [vNote, setVNote] = useState("");
+  const [vErr, setVErr] = useState("");
+  const [vEditingId, setVEditingId] = useState(null);
+
+  const resetVersementForm = () => {
+    setVDate(todayISO()); setVMontant(""); setVNote(""); setVEditingId(null);
+  };
+
+  const startEditVersement = (v) => {
+    setVErr("");
+    setVDate(v.date); setVMontant(v.montant ?? ""); setVNote(v.note || ""); setVEditingId(v.id);
+  };
+
+  const saveVersement = () => {
+    setVErr("");
+    if (!selectedId) { setVErr("Choisissez un client."); return; }
+    if (!vMontant || num(vMontant) <= 0) { setVErr("Indiquez un montant."); return; }
+    if (isFutureDate(vDate)) { setVErr("La date ne peut pas être dans le futur."); return; }
+    const existing = vEditingId ? db.versementsPartenaires.find((v) => v.id === vEditingId) : null;
+    const row = { id: vEditingId || uid(), partenaireId: selectedId, date: vDate, montant: vMontant, note: vNote, timestamp: existing?.timestamp || new Date().toISOString() };
+    let next = { ...db, versementsPartenaires: vEditingId ? db.versementsPartenaires.map((v) => (v.id === vEditingId ? row : v)) : [...db.versementsPartenaires, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: null, entity: "versement_partenaire", action: vEditingId ? "modification" : "création", after: { date: vDate, montant: vMontant } });
+    setDb(next);
+    resetVersementForm();
+  };
+
+  const removeVersementP = (v) => {
+    if (!confirm("Supprimer ce versement ?")) return;
+    let next = { ...db, versementsPartenaires: db.versementsPartenaires.filter((x) => x.id !== v.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: null, entity: "versement_partenaire", action: "suppression", before: { date: v.date } });
+    setDb(next);
+    if (vEditingId === v.id) resetVersementForm();
+  };
+
+  const client = (db.partenaires || []).find((p) => p.id === selectedId);
+  const commandesClient = (db.commandesPartenaires || []).filter((c) => c.partenaireId === selectedId).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const versementsClient = (db.versementsPartenaires || []).filter((v) => v.partenaireId === selectedId).sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  const totalVolumeCommande = commandesClient.reduce((a, c) => a + num(c.quantiteCommandee), 0);
+  const totalVolumeLivre = commandesClient.reduce((a, c) => a + num(c.quantiteLivree), 0);
+  const totalValeurCommandee = commandesClient.reduce((a, c) => a + bonComTotal(c), 0);
+  const totalVerse = versementsClient.reduce((a, v) => a + num(v.montant), 0);
+  const resteALivrer = totalVolumeCommande - totalVolumeLivre;
+  const resteAPayer = totalValeurCommandee - totalVerse;
+
+  if (profile.role === "gerant" && !profile.partenaireId) {
+    return (
+      <div className="flex flex-col gap-4">
+        <h2 className="smi-display text-2xl">Partenaires</h2>
+        <EmptyState icon={Users} title="Aucun partenaire assigné à votre compte" hint="Contactez l'administrateur pour qu'il vous assigne un client partenaire depuis l'onglet Stations." />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Partenaires</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Suivi des commandes et versements des clients/stations partenaires — sans le contrôle quotidien du réseau (pas de relevé, stock ou caisse).</p>
+      </div>
+
+      {isAdmin && (
+        <Card className="max-w-md">
+          <p className="font-semibold text-sm mb-3">Clients partenaires</p>
+          <div className="grid sm:grid-cols-2 gap-3 mb-3">
+            <Field label="Nom du client">
+              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={newNom} onChange={(e) => setNewNom(e.target.value)} placeholder="ex : Tawoutama Irie" />
+            </Field>
+            <Field label="Localisation">
+              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={newLocalisation} onChange={(e) => setNewLocalisation(e.target.value)} placeholder="ex : Macenta" />
+            </Field>
+          </div>
+          {clientErr && <p className="text-xs flex items-center gap-1.5 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {clientErr}</p>}
+          <div className="flex justify-end"><Button onClick={createClient}><Plus size={15} /> Ajouter le client</Button></div>
+
+          {(db.partenaires || []).length > 0 && (
+            <div className="flex flex-col gap-1.5 mt-4 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
+              {db.partenaires.map((p) => (
+                <div key={p.id} className="flex items-center justify-between text-xs">
+                  <button onClick={() => setSelectedId(p.id)} className="smi-btn text-left flex-1" style={{ color: selectedId === p.id ? C.amber : C.text, fontWeight: selectedId === p.id ? 700 : 400 }}>
+                    {p.nom} {p.localisation ? `— ${p.localisation}` : ""}
+                  </button>
+                  <button onClick={() => removeClient(p)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {!selectedId ? (
+        <EmptyState icon={Users} title="Aucun client sélectionné" hint={isAdmin ? "Ajoutez ou choisissez un client partenaire ci-dessus." : "Aucun client disponible."} />
+      ) : (
+        <>
+          <Card>
+            <p className="font-semibold text-sm mb-1">{client?.nom}</p>
+            <p className="text-xs mb-3" style={{ color: C.textFaint }}>{client?.localisation}</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                <p className="text-[10px] uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Volume commandé</p>
+                <GaugeNumber value={fmtVol(totalVolumeCommande)} tone="teal" />
+              </div>
+              <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                <p className="text-[10px] uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Volume livré</p>
+                <GaugeNumber value={fmtVol(totalVolumeLivre)} tone="teal" />
+                <p className="text-[10px] mt-1" style={{ color: resteALivrer > 0 ? C.danger : C.success }}>Reste à livrer : {fmtVol(resteALivrer)}</p>
+              </div>
+              <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+                <p className="text-[10px] uppercase font-semibold mb-1" style={{ color: C.amber }}>Valeur commandée</p>
+                <GaugeNumber value={fmtMontant(totalValeurCommandee, "GNF")} tone="amber" />
+              </div>
+              <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                <p className="text-[10px] uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Montant versé</p>
+                <GaugeNumber value={fmtMontant(totalVerse, "GNF")} />
+                <p className="text-[10px] mt-1" style={{ color: resteAPayer > 0 ? C.danger : C.success }}>Reste à payer : {fmtMontant(resteAPayer, "GNF")}</p>
+              </div>
+            </div>
+          </Card>
+
+          <Card className="max-w-md">
+            <p className="font-semibold text-sm mb-3">Nouvelle commande</p>
+            {cEditingId && (
+              <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+                <span className="text-xs" style={{ color: C.teal }}>Modification d'une commande existante</span>
+                <button onClick={resetCommandeForm} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
+              </div>
+            )}
+            <div className="grid sm:grid-cols-2 gap-3 mb-3">
+              <Field label="Date"><TextInput type="date" value={cDate} onChange={(e) => setCDate(e.target.value)} max={todayISO()} /></Field>
+              <Field label="Produit">
+                <SelectInput value={cProduit} onChange={(e) => setCProduit(e.target.value)}>
+                  <option value="essence">Essence</option>
+                  <option value="gasoil">Gasoil</option>
+                </SelectInput>
+              </Field>
+            </div>
+            <div className="grid sm:grid-cols-3 gap-3 mb-3">
+              <Field label="Quantité commandée (L)"><NumberInput value={cQteCommandee} onChange={(e) => setCQteCommandee(e.target.value)} /></Field>
+              <Field label="Quantité livrée (L)" hint="Laissez vide si pas encore livrée"><NumberInput value={cQteLivree} onChange={(e) => setCQteLivree(e.target.value)} /></Field>
+              <Field label="Prix unitaire (GNF)"><NumberInput value={cPrixUnitaire} onChange={(e) => setCPrixUnitaire(e.target.value)} /></Field>
+            </div>
+            {cErr && <p className="text-xs flex items-center gap-1.5 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {cErr}</p>}
+            <div className="flex justify-end"><Button onClick={saveCommande}><CheckCircle2 size={16} /> {cEditingId ? "Mettre à jour" : "Valider"}</Button></div>
+          </Card>
+
+          <Card>
+            <p className="font-semibold text-sm mb-3">Historique des commandes</p>
+            {commandesClient.length === 0 ? (
+              <EmptyState icon={Truck} title="Aucune commande enregistrée" />
+            ) : (
+              <div className="overflow-x-auto smi-scroll">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <th className="text-left py-1" style={{ color: C.textMuted }}>Date</th>
+                      <th className="text-left py-1" style={{ color: C.textMuted }}>Produit</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Commandé (L)</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Livré (L)</th>
+                      <th className="text-right py-1" style={{ color: C.textMuted }}>Valeur (GNF)</th>
+                      <th className="py-1"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {commandesClient.map((c) => (
+                      <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <td className="py-1">{fmtDateLong(c.date)}</td>
+                        <td className="py-1">{c.produit === "essence" ? "Essence" : "Gasoil"}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(c.quantiteCommandee)}</td>
+                        <td className="py-1 text-right smi-mono">{c.quantiteLivree ? fmtVol(c.quantiteLivree) : "—"}</td>
+                        <td className="py-1 text-right smi-mono">{fmtMontant(bonComTotal(c), "GNF")}</td>
+                        <td className="py-1 flex gap-2 justify-end">
+                          <button onClick={() => startEditCommande(c)} className="smi-btn" style={{ color: C.teal }}><Pencil size={13} /></button>
+                          {isAdmin && <button onClick={() => removeCommande(c)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          <Card className="max-w-md">
+            <p className="font-semibold text-sm mb-3">Nouveau versement</p>
+            {vEditingId && (
+              <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+                <span className="text-xs" style={{ color: C.teal }}>Modification d'un versement existant</span>
+                <button onClick={resetVersementForm} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
+              </div>
+            )}
+            <div className="grid sm:grid-cols-2 gap-3 mb-3">
+              <Field label="Date"><TextInput type="date" value={vDate} onChange={(e) => setVDate(e.target.value)} max={todayISO()} /></Field>
+              <Field label="Montant (GNF)"><NumberInput value={vMontant} onChange={(e) => setVMontant(e.target.value)} /></Field>
+            </div>
+            <Field label="Note (optionnel)">
+              <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={vNote} onChange={(e) => setVNote(e.target.value)} placeholder="ex : Virement bancaire" />
+            </Field>
+            {vErr && <p className="text-xs flex items-center gap-1.5 mt-2 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {vErr}</p>}
+            <div className="flex justify-end mt-2"><Button onClick={saveVersement}><CheckCircle2 size={16} /> {vEditingId ? "Mettre à jour" : "Valider"}</Button></div>
+          </Card>
+
+          <Card>
+            <p className="font-semibold text-sm mb-3">Historique des versements</p>
+            {versementsClient.length === 0 ? (
+              <EmptyState icon={Landmark} title="Aucun versement enregistré" />
+            ) : (
+              <div className="flex flex-col gap-2">
+                {versementsClient.map((v) => (
+                  <div key={v.id} className="rounded-md p-2.5 flex items-center gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <div className="flex-1 min-w-0 text-xs" style={{ color: C.textMuted }}>
+                      <span className="font-medium" style={{ color: C.text }}>{fmtDateLong(v.date)}</span>
+                      {v.note && <span> · {v.note}</span>}
+                    </div>
+                    <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(v.montant, "GNF")}</span>
+                    <button onClick={() => startEditVersement(v)} className="smi-btn flex-shrink-0" style={{ color: C.teal }}><Pencil size={13} /></button>
+                    {isAdmin && <button onClick={() => removeVersementP(v)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={13} /></button>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
 
 function PompesView({ db, setDb, profile }) {
   const [form, setForm] = useState(null);
@@ -1474,9 +1794,9 @@ function CaisseView({ db, setDb, profile }) {
             <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris automatiquement de l'onglet Bons.</p>
           </div>
           <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Total Versements du jour (auto, info)</p>
+            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Total Versements du jour (auto)</p>
             <GaugeNumber value={fmtMontant(live.totalVersement, devise)} />
-            <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris automatiquement de l'onglet Versement.</p>
+            <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris automatiquement de l'onglet Versement — déduit de la caisse attendue. Mettez 0 dans « Caisse précédente » le jour où tout a été versé.</p>
           </div>
         </div>
 
@@ -3186,7 +3506,7 @@ function RapportJournalierView({ db, profile }) {
                     </tbody>
                   </table>
                 </div>
-                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Chiffre d'affaires du jour − Total Bon − Paiement marchand (le Versement n'est pas déduit : il documente le dépôt d'une partie de la caisse déjà comptée)</p>
+                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Chiffre d'affaires du jour − Total Bon − Paiement marchand − Total Versement (un versement peut être fait en cours de journée, l'argent sort donc réellement de la caisse)</p>
               </>
             )}
           </Card>
@@ -3290,7 +3610,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "caisse", title: "Caisse", adminOnly: false,
-    text: "« Caisse précédente » se saisit manuellement chaque jour (mettez 0 si tout l'argent a été versé la veille). « Caisse du jour » se pré-remplit avec le CA du jour, à corriger selon le comptage réel. Les totaux « Bons » et « Versements » du jour s'affichent automatiquement — ils se saisissent désormais uniquement dans les onglets dédiés Bons et Versement, plus dans Caisse, pour éviter toute double saisie. Le Versement ne réduit pas la caisse attendue (il documente juste où est allé l'argent déjà compté) ; seuls le Bon et le Paiement marchand la réduisent réellement.",
+    text: "« Caisse précédente » se saisit manuellement chaque jour (mettez 0 si tout l'argent a été versé la veille). « Caisse du jour » se pré-remplit avec le CA du jour, à corriger selon le comptage réel. Les totaux « Bons » et « Versements » du jour s'affichent automatiquement — ils se saisissent désormais uniquement dans les onglets dédiés Bons et Versement, plus dans Caisse, pour éviter toute double saisie. Bon, Paiement marchand et Versement réduisent tous les trois la caisse attendue, puisqu'un versement peut être fait en cours de journée (anticipation d'une grosse recette).",
   },
   {
     key: "inspection", title: "Inspection", adminOnly: false,
@@ -3318,7 +3638,11 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
-    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise). Vous pouvez définir un code PIN par station, demandé au gérant à la connexion.",
+    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
+  },
+  {
+    key: "partenaires", title: "Partenaires", adminOnly: false,
+    text: "Suivi des clients/stations partenaires qui ne sont pas sous le contrôle quotidien strict du réseau (pas de relevé, stock ou caisse) — seulement leurs commandes et versements. L'admin gère la liste des clients ; un gérant peut être assigné à un client précis (depuis Stations) et n'accède alors qu'à ce client. Chaque commande indique la quantité commandée, livrée, et le prix ; le tableau de bord du client affiche volume commandé, volume livré, valeur commandée et montant versé, avec le reste à livrer et le reste à payer calculés automatiquement.",
   },
   {
     key: "pompes", title: "Pompes", adminOnly: true,
@@ -3398,7 +3722,7 @@ function GuideView({ profile }) {
 
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant", partenaire: "Client partenaire", commande_partenaire: "Commande partenaire", versement_partenaire: "Versement partenaire" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
@@ -3456,6 +3780,7 @@ const TABS = [
   { key: "guide", label: "Guide d'utilisation", icon: BookOpen, adminOnly: false },
   { key: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, adminOnly: true },
   { key: "stations", label: "Stations", icon: Building2, adminOnly: true },
+  { key: "partenaires", label: "Partenaires", icon: Users, roles: ["admin", "gerant"] },
   { key: "pompes", label: "Pompes", icon: Gauge, adminOnly: true },
   { key: "releve", label: "Relevé Pompes", icon: Fuel, adminOnly: false },
   { key: "ventes", label: "Ventes", icon: Wallet, adminOnly: false },
@@ -3503,6 +3828,7 @@ export default function App() {
       case "guide": return <GuideView profile={profile} />;
       case "dashboard": return <DashboardView db={db} />;
       case "stations": return <StationsView db={db} setDb={setDb} profile={profile} />;
+      case "partenaires": return <PartenairesView db={db} setDb={setDb} profile={profile} />;
       case "pompes": return <PompesView db={db} setDb={setDb} profile={profile} />;
       case "releve": return <RelevePompesView db={db} setDb={setDb} profile={profile} />;
       case "ventes": return <VentesView db={db} setDb={setDb} profile={profile} />;
