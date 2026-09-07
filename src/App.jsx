@@ -2341,6 +2341,9 @@ function VersementView({ db, setDb, profile }) {
   // Cumul automatique sur toute la période affichée — recalculé dès qu'un versement est
   // ajouté ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
   const cumulTotal = history.reduce((a, v) => a + versementTotal(v), 0);
+  const cumulBancaire = history.reduce((a, v) => a + num(v.banqueMontant), 0);
+  const cumulMarchand = history.reduce((a, v) => a + num(v.paiementMarchandMontant), 0);
+  const cumulAutre = history.reduce((a, v) => a + num(v.autreMontant), 0);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2349,7 +2352,7 @@ function VersementView({ db, setDb, profile }) {
       <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
         <div>
           <h2 className="smi-display text-2xl flex items-center gap-2"><Landmark size={22} /> Versement</h2>
-          <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des dépôts du jour : versement bancaire, paiement marchand, autre versement.</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des dépôts du jour : versement bancaire, paiement marchand, versement au compte du DG.</p>
         </div>
         <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
       </div>
@@ -2393,8 +2396,8 @@ function VersementView({ db, setDb, profile }) {
 
         <div className="grid sm:grid-cols-2 gap-3 mb-3">
           <Field label={`Paiement marchand (${devise})`}><NumberInput value={paiementMarchandMontant} onChange={(e) => setPaiementMarchandMontant(e.target.value)} /></Field>
-          <Field label={`Autre versement (${devise})`}><NumberInput value={autreMontant} onChange={(e) => setAutreMontant(e.target.value)} /></Field>
-          <Field label="Libellé (autre versement)">
+          <Field label={`Versement au compte du DG (${devise})`}><NumberInput value={autreMontant} onChange={(e) => setAutreMontant(e.target.value)} /></Field>
+          <Field label="Libellé (versement au compte du DG)">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={autreLibelle} onChange={(e) => setAutreLibelle(e.target.value)} placeholder="ex : Remboursement caisse" />
           </Field>
         </div>
@@ -2418,9 +2421,23 @@ function VersementView({ db, setDb, profile }) {
         </div>
         <p className="font-semibold text-sm mb-3">Historique des versements</p>
         {grouped.length > 0 && (
-          <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
-            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
-            <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" size="lg" />
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
+              <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul bancaire</p>
+              <GaugeNumber value={fmtMontant(cumulBancaire, devise)} />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul paiement marchand</p>
+              <GaugeNumber value={fmtMontant(cumulMarchand, devise)} />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul versement au compte du DG</p>
+              <GaugeNumber value={fmtMontant(cumulAutre, devise)} />
+            </div>
           </div>
         )}
         {grouped.length === 0 ? (
@@ -2458,7 +2475,7 @@ function VersementView({ db, setDb, profile }) {
                               {num(v.banqueMontant) > 0 && <span>Bancaire{v.banqueNom ? ` (${v.banqueNom})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.banqueMontant, dv)}</span></span>}
                               {v.recuNumero && <span>N° de reçu : <span className="smi-mono" style={{ color: C.text }}>{v.recuNumero}</span></span>}
                               {num(v.paiementMarchandMontant) > 0 && <span>Paiement marchand : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.paiementMarchandMontant, dv)}</span></span>}
-                              {num(v.autreMontant) > 0 && <span>Autre versement{v.autreLibelle ? ` (${v.autreLibelle})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
+                              {num(v.autreMontant) > 0 && <span>Versement au compte du DG{v.autreLibelle ? ` (${v.autreLibelle})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
                             </div>
                             <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(vTotal, dv)}</span>
                             <button onClick={() => startEdit(v)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
@@ -2584,6 +2601,8 @@ function BonsView({ db, setDb, profile }) {
   // Cumul automatique sur toute la période affichée — recalculé dès qu'un bon est ajouté
   // ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
   const cumulTotal = history.reduce((a, b) => a + bonTotal(b), 0);
+  const cumulBon = history.reduce((a, b) => a + num(b.quantite) * num(b.prixUnitaire), 0);
+  const cumulFraisRoute = history.reduce((a, b) => a + num(b.fraisRoute), 0);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2651,9 +2670,19 @@ function BonsView({ db, setDb, profile }) {
         </div>
         <p className="font-semibold text-sm mb-3">Historique des bons</p>
         {grouped.length > 0 && (
-          <div className="rounded-md p-3 mb-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
-            <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
-            <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" size="lg" />
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
+              <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Bon (qté × prix)</p>
+              <GaugeNumber value={fmtMontant(cumulBon, devise)} />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul frais de route</p>
+              <GaugeNumber value={fmtMontant(cumulFraisRoute, devise)} />
+            </div>
           </div>
         )}
         {grouped.length === 0 ? (
@@ -3129,6 +3158,264 @@ function DashboardView({ db }) {
 
 /* ---------------------------- Rapport mensuel view --------------------------- */
 
+/* ---------------------------- Rapport hebdomadaire ------------------------------ */
+
+const JOURS_SEMAINE = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
+
+// Renvoie le lundi et le dimanche de la semaine contenant la date donnée (format YYYY-MM-DD).
+function getWeekBounds(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  const day = d.getDay(); // 0 = dimanche, 1 = lundi, ...
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diffToMonday);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  const fmt = (x) => x.toISOString().slice(0, 10);
+  return { start: fmt(monday), end: fmt(sunday) };
+}
+
+function RapportHebdomadaireView({ db, profile }) {
+  const isGerant = profile.role === "gerant";
+  const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
+  const [refDate, setRefDate] = useState(todayISO());
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const exportPdf = () => window.print();
+
+  const { start, end } = getWeekBounds(refDate);
+  const station = db.stations.find((s) => s.id === stationId);
+  const devise = station?.devise || "GNF";
+
+  const versementsSemaine = db.versements.filter((v) => (!stationId || v.stationId === stationId) && v.date >= start && v.date <= end);
+  const bonsSemaine = db.bons.filter((b) => (!stationId || b.stationId === stationId) && b.date >= start && b.date <= end)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  const receptionsSemaine = db.receptions.filter((r) => (!stationId || r.stationId === stationId) && r.date >= start && r.date <= end)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  const jours = useMemo(() => {
+    const list = [];
+    const d = new Date(`${start}T00:00:00`);
+    for (let i = 0; i < 7; i++) {
+      const dateStr = d.toISOString().slice(0, 10);
+      const entriesJour = versementsSemaine.filter((v) => v.date === dateStr);
+      const bancaire = entriesJour.reduce((a, v) => a + num(v.banqueMontant), 0);
+      const marchand = entriesJour.reduce((a, v) => a + num(v.paiementMarchandMontant), 0);
+      const dg = entriesJour.reduce((a, v) => a + num(v.autreMontant), 0);
+      const vente = stationId ? computeVente(db.releves, db.ventes, stationId, dateStr) : null;
+      list.push({
+        date: dateStr, nomJour: JOURS_SEMAINE[i], bancaire, marchand, dg, total: bancaire + marchand + dg,
+        venteEssence: vente?.essence || 0, venteGasoil: vente?.gasoil || 0, ca: vente?.ca || 0,
+      });
+      d.setDate(d.getDate() + 1);
+    }
+    return list;
+  }, [start, versementsSemaine, stationId, db.releves, db.ventes]);
+
+  const totalSemaine = jours.reduce((acc, j) => ({
+    bancaire: acc.bancaire + j.bancaire, marchand: acc.marchand + j.marchand, dg: acc.dg + j.dg, total: acc.total + j.total,
+    venteEssence: acc.venteEssence + j.venteEssence, venteGasoil: acc.venteGasoil + j.venteGasoil, ca: acc.ca + j.ca,
+  }), { bancaire: 0, marchand: 0, dg: 0, total: 0, venteEssence: 0, venteGasoil: 0, ca: 0 });
+
+  const totalBons = bonsSemaine.reduce((a, b) => a + bonTotal(b), 0);
+
+  // Stock restant en fin de semaine : dernier contrôle de stock enregistré au plus tard
+  // le dimanche de la semaine visée (à défaut, le plus récent avant cette date).
+  const stockFinSemaine = useMemo(() => {
+    if (!stationId) return null;
+    const record = [...db.stocks].filter((s) => s.stationId === stationId && s.date <= end).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    if (!record) return null;
+    return { ...computeStock(db.releves, db.stocks, stationId, record.date), date: record.date };
+  }, [stationId, end, db.stocks, db.releves]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
+        <div>
+          <h2 className="smi-display text-2xl">Rapport hebdomadaire</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Ventes, versements, bons, livraisons et stock restant sur la semaine (lundi à dimanche).</p>
+        </div>
+        <Button variant="ghost" onClick={exportPdf}><Printer size={16} /> Exporter en PDF</Button>
+      </div>
+
+      <Card className="smi-no-print">
+        <div className="grid sm:grid-cols-2 gap-3">
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} allowAll={!isGerant} disabled={isGerant} /></Field>
+          <Field label="N'importe quelle date de la semaine visée" hint={`Semaine du ${fmtDateLong(start)} au ${fmtDateLong(end)}`}>
+            <TextInput type="date" value={refDate} onChange={(e) => setRefDate(e.target.value)} max={todayISO()} />
+          </Field>
+        </div>
+      </Card>
+
+      <Card className="smi-print-area">
+        <div className="hidden smi-print-only mb-3">
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport hebdomadaire</h1>
+          <p style={{ fontSize: 13, color: "#444" }}>{station?.nom || "Toutes stations"} — Semaine du {fmtDateLong(start)} au {fmtDateLong(end)}</p>
+        </div>
+
+        <p className="text-sm font-semibold mb-2">1. Ventes de la semaine</p>
+        <div className="overflow-x-auto smi-scroll mb-4">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                <th className="text-left py-1.5" style={{ color: C.textMuted }}>Jour</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Essence (L)</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Gasoil (L)</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Chiffre d'affaires</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jours.map((j) => (
+                <tr key={j.date} style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <td className="py-1.5">{j.nomJour} <span style={{ color: C.textFaint }}>({fmtDateLong(j.date)})</span></td>
+                  <td className="py-1.5 text-right smi-mono">{fmtVol(j.venteEssence)}</td>
+                  <td className="py-1.5 text-right smi-mono">{fmtVol(j.venteGasoil)}</td>
+                  <td className="py-1.5 text-right smi-mono font-semibold">{fmtMontant(j.ca, devise)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                <td className="py-2 font-bold">Total semaine</td>
+                <td className="py-2 text-right smi-mono font-bold">{fmtVol(totalSemaine.venteEssence)}</td>
+                <td className="py-2 text-right smi-mono font-bold">{fmtVol(totalSemaine.venteGasoil)}</td>
+                <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(totalSemaine.ca, devise)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <p className="text-sm font-semibold mb-2 mt-3">2. Versements de la semaine</p>
+        <div className="overflow-x-auto smi-scroll mb-4">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                <th className="text-left py-1.5" style={{ color: C.textMuted }}>Jour</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Bancaire</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Paiement marchand</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Versement au compte du DG</th>
+                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total du jour</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jours.map((j) => (
+                <tr key={j.date} style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <td className="py-1.5">{j.nomJour} <span style={{ color: C.textFaint }}>({fmtDateLong(j.date)})</span></td>
+                  <td className="py-1.5 text-right smi-mono">{fmtMontant(j.bancaire, devise)}</td>
+                  <td className="py-1.5 text-right smi-mono">{fmtMontant(j.marchand, devise)}</td>
+                  <td className="py-1.5 text-right smi-mono">{fmtMontant(j.dg, devise)}</td>
+                  <td className="py-1.5 text-right smi-mono font-semibold">{fmtMontant(j.total, devise)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                <td className="py-2 font-bold">Total semaine</td>
+                <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.bancaire, devise)}</td>
+                <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.marchand, devise)}</td>
+                <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.dg, devise)}</td>
+                <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(totalSemaine.total, devise)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <p className="text-sm font-semibold mb-2 mt-3">3. Bons de la semaine</p>
+        {bonsSemaine.length === 0 ? (
+          <p className="text-xs mb-4" style={{ color: C.textFaint }}>Aucun bon cette semaine.</p>
+        ) : (
+          <div className="overflow-x-auto smi-scroll mb-4">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Date</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Libellé</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Quantité (L)</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Montant</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bonsSemaine.map((b) => (
+                  <tr key={b.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td className="py-1.5">{fmtDateLong(b.date)}</td>
+                    <td className="py-1.5">{b.libelle}</td>
+                    <td className="py-1.5 text-right smi-mono">{num(b.quantite) > 0 ? fmtVol(b.quantite) : "—"}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(bonTotal(b), devise)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                  <td colSpan={3} className="py-2 font-bold">Total Bons semaine</td>
+                  <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalBons, devise)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+
+        <p className="text-sm font-semibold mb-2 mt-3">4. Livraisons (Réceptions) de la semaine</p>
+        {receptionsSemaine.length === 0 ? (
+          <p className="text-xs mb-4" style={{ color: C.textFaint }}>Aucune livraison cette semaine.</p>
+        ) : (
+          <div className="overflow-x-auto smi-scroll mb-4">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Date</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Produit</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Quantité (L)</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Fournisseur</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>N° Bon</th>
+                </tr>
+              </thead>
+              <tbody>
+                {receptionsSemaine.map((r) => (
+                  <tr key={r.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td className="py-1.5">{fmtDateLong(r.date)}</td>
+                    <td className="py-1.5">{r.produit === "essence" ? "Essence" : "Gasoil"}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtVol(r.quantite)}</td>
+                    <td className="py-1.5">{r.fournisseur || "—"}</td>
+                    <td className="py-1.5">{r.numeroBon || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p className="text-sm font-semibold mb-2 mt-3">5. Stock restant en fin de semaine</p>
+        {!stockFinSemaine ? (
+          <p className="text-xs" style={{ color: C.textFaint }}>Aucun contrôle de stock enregistré au plus tard le {fmtDateLong(end)}.</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 max-w-sm">
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Essence</p>
+              <GaugeNumber value={fmtVol(stockFinSemaine.stockClotureEssence)} tone="amber" />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Gasoil</p>
+              <GaugeNumber value={fmtVol(stockFinSemaine.stockClotureGasoil)} tone="teal" />
+            </div>
+            {stockFinSemaine.date !== end && (
+              <p className="text-xs col-span-2" style={{ color: C.textFaint }}>Dernier contrôle disponible : {fmtDateLong(stockFinSemaine.date)} (pas de contrôle exactement le {fmtDateLong(end)}).</p>
+            )}
+          </div>
+        )}
+
+        <div className="hidden smi-print-only" style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <QrCode value={appUrl} size={64} />
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+              <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 function RapportMensuelView({ db }) {
   const now = new Date();
   const [stationId, setStationId] = useState("");
@@ -3600,7 +3887,7 @@ function RapportJournalierView({ db, profile }) {
                         <th className="text-left py-1" style={{ color: C.textMuted }}>Libellé</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Versement bancaire ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Paiement marchand ({devise})</th>
-                        <th className="text-right py-1" style={{ color: C.textMuted }}>Autre versement ({devise})</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Versement au compte du DG ({devise})</th>
                         <th className="text-right py-1" style={{ color: C.textMuted }}>Montant ({devise})</th>
                         <th className="text-center py-1" style={{ color: C.textMuted }}>Photo</th>
                       </tr>
@@ -3767,7 +4054,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "versement", title: "Versement", adminOnly: false,
-    text: "Enregistrement des dépôts du jour : versement bancaire (nom de la banque, montant, photo du reçu), paiement marchand, et autre versement (avec libellé). Le cumul du jour se calcule automatiquement, même si les versements sont saisis séparément.",
+    text: "Enregistrement des dépôts du jour : versement bancaire (nom de la banque, montant, photo du reçu), paiement marchand, et versement au compte du DG (avec libellé). Le cumul du jour se calcule automatiquement, même si les versements sont saisis séparément.",
   },
   {
     key: "bons", title: "Bons", adminOnly: false,
@@ -3776,6 +4063,10 @@ const GUIDE_SECTIONS = [
   {
     key: "rapport_jour", title: "Rapport journalier", adminOnly: false,
     text: "Rapport détaillé d'une station pour une journée précise : index des pompes, ventes, stock, coupon de bon/versement, et synthèse caisse — exactement dans le format papier habituel. Bouton « Exporter en PDF » pour l'enregistrer ou l'imprimer.",
+  },
+  {
+    key: "rapport_hebdo", title: "Rapport hebdomadaire", adminOnly: false,
+    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG), bons de la semaine, livraisons reçues, et stock restant au dimanche. Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
@@ -3938,6 +4229,7 @@ const TABS = [
   { key: "mouvements", label: "Mouvements Pompiste", icon: Users, roles: ["gerant", "pompiste"] },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
   { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: false },
+  { key: "rapport_hebdo", label: "Rapport hebdomadaire", icon: CalendarRange, adminOnly: false },
   { key: "journal", label: "Journal des saisies", icon: History, adminOnly: true },
   { key: "securite", label: "Sécurité", icon: Lock, adminOnly: true },
 ];
@@ -3994,6 +4286,7 @@ export default function App() {
       case "mouvements": return <MouvementsPompisteView db={db} setDb={setDb} profile={profile} />;
       case "rapport": return <RapportMensuelView db={db} />;
       case "rapport_jour": return <RapportJournalierView db={db} profile={profile} />;
+      case "rapport_hebdo": return <RapportHebdomadaireView db={db} profile={profile} />;
       case "journal": return <AuditLogView db={db} />;
       case "securite": return <SecuriteView profile={profile} />;
       default: return null;
