@@ -16,29 +16,42 @@ import QRCode from "qrcode";
    stations et pompes sont des enregistrements, jamais des champs figés.
    ========================================================================= */
 
+// Toutes les couleurs pointent vers des variables CSS (définies dans StyleInjector),
+// pas des codes figés — ça permet de changer le thème (clair/sombre) et la couleur
+// d'accent depuis les Paramètres d'affichage, sans toucher au reste du code : chaque
+// endroit qui utilise C.xxx suit automatiquement le nouveau réglage.
 const C = {
-  bg: "#0E1512",
-  bgAlt: "#0A0F0D",
-  panel: "#161F1A",
-  panelAlt: "#1D2921",
-  border: "#2A3A30",
-  borderLight: "#3A4C40",
-  amber: "#E8A33D",
-  amberDim: "#8A6224",
-  amberSoft: "#3A2E18",
-  teal: "#3FA7A0",
-  tealSoft: "#16302E",
-  text: "#F1EEE6",
-  textMuted: "#93A398",
-  textFaint: "#5E6E64",
-  danger: "#D9695F",
-  dangerSoft: "#3A2220",
-  success: "#5FAE6E",
+  bg: "var(--smi-bg)",
+  bgAlt: "var(--smi-bg-alt)",
+  panel: "var(--smi-panel)",
+  panelAlt: "var(--smi-panel-alt)",
+  border: "var(--smi-border)",
+  borderLight: "var(--smi-border-light)",
+  amber: "var(--smi-accent)",
+  amberDim: "var(--smi-accent-dim)",
+  amberSoft: "var(--smi-accent-soft)",
+  teal: "var(--smi-teal)",
+  tealSoft: "var(--smi-teal-soft)",
+  text: "var(--smi-text)",
+  textMuted: "var(--smi-text-muted)",
+  textFaint: "var(--smi-text-faint)",
+  danger: "var(--smi-danger)",
+  dangerSoft: "var(--smi-danger-soft)",
+  success: "var(--smi-success)",
 };
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
-.smi-root { font-family: 'Inter', system-ui, sans-serif; background:${C.bg}; color:${C.text}; }
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&family=Poppins:wght@400;500;600;700&display=swap');
+:root {
+  --smi-bg: #0E1512; --smi-bg-alt: #0A0F0D; --smi-panel: #161F1A; --smi-panel-alt: #1D2921;
+  --smi-border: #2A3A30; --smi-border-light: #3A4C40;
+  --smi-accent: #E8A33D; --smi-accent-dim: #8A6224; --smi-accent-soft: #3A2E18;
+  --smi-teal: #3FA7A0; --smi-teal-soft: #16302E;
+  --smi-text: #F1EEE6; --smi-text-muted: #93A398; --smi-text-faint: #5E6E64;
+  --smi-danger: #D9695F; --smi-danger-soft: #3A2220; --smi-success: #5FAE6E;
+  --smi-font-body: 'Inter', system-ui, sans-serif;
+}
+.smi-root { font-family: var(--smi-font-body); background:${C.bg}; color:${C.text}; }
 .smi-display { font-family: 'Bebas Neue', 'Inter', sans-serif; letter-spacing: 0.04em; }
 .smi-mono { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
 .smi-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
@@ -63,6 +76,132 @@ const FONTS = `
 
 function StyleInjector() {
   return <style dangerouslySetInnerHTML={{ __html: FONTS }} />;
+}
+
+/* --------------------------- Paramètres d'affichage ----------------------------
+   Réglages personnels (thème, taille du texte, couleur d'accent, police) — gardés
+   sur l'appareil de chaque utilisateur (localStorage), pas dans la base commune :
+   chacun règle l'affichage à son goût, sans influencer les autres. */
+const THEME_PRESETS = {
+  sombre: { bg: "#0E1512", bgAlt: "#0A0F0D", panel: "#161F1A", panelAlt: "#1D2921", border: "#2A3A30", borderLight: "#3A4C40", text: "#F1EEE6", textMuted: "#93A398", textFaint: "#5E6E64" },
+  clair: { bg: "#F7F5F1", bgAlt: "#FFFFFF", panel: "#FFFFFF", panelAlt: "#F0EDE6", border: "#DAD3C7", borderLight: "#C4BBA9", text: "#1E2420", textMuted: "#5B6B60", textFaint: "#8A968E" },
+};
+const ACCENT_PRESETS = { ambre: "#E8A33D", bleu: "#4C8FE8", vert: "#5FAE6E", corail: "#E86A5C", violet: "#A279E0" };
+const FONT_PRESETS = {
+  inter: "'Inter', system-ui, sans-serif",
+  systeme: "system-ui, -apple-system, sans-serif",
+  georgia: "Georgia, 'Times New Roman', serif",
+  poppins: "'Poppins', 'Inter', sans-serif",
+};
+const SIZE_PRESETS = { petit: "14px", normal: "16px", grand: "18px" };
+const DISPLAY_SETTINGS_KEY = "smi_sarl_display_settings_v1";
+const DEFAULT_DISPLAY_SETTINGS = { theme: "sombre", accent: "ambre", taille: "normal", police: "inter" };
+
+function loadDisplaySettings() {
+  try {
+    const raw = localStorage.getItem(DISPLAY_SETTINGS_KEY);
+    if (raw) return { ...DEFAULT_DISPLAY_SETTINGS, ...JSON.parse(raw) };
+  } catch { /* stockage indisponible : on reste sur les valeurs par défaut */ }
+  return { ...DEFAULT_DISPLAY_SETTINGS };
+}
+
+function applyDisplaySettings(s) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  const theme = THEME_PRESETS[s.theme] || THEME_PRESETS.sombre;
+  root.style.setProperty("--smi-bg", theme.bg);
+  root.style.setProperty("--smi-bg-alt", theme.bgAlt);
+  root.style.setProperty("--smi-panel", theme.panel);
+  root.style.setProperty("--smi-panel-alt", theme.panelAlt);
+  root.style.setProperty("--smi-border", theme.border);
+  root.style.setProperty("--smi-border-light", theme.borderLight);
+  root.style.setProperty("--smi-text", theme.text);
+  root.style.setProperty("--smi-text-muted", theme.textMuted);
+  root.style.setProperty("--smi-text-faint", theme.textFaint);
+  root.style.setProperty("--smi-accent", ACCENT_PRESETS[s.accent] || ACCENT_PRESETS.ambre);
+  root.style.setProperty("--smi-font-body", FONT_PRESETS[s.police] || FONT_PRESETS.inter);
+  root.style.fontSize = SIZE_PRESETS[s.taille] || SIZE_PRESETS.normal;
+}
+
+function saveDisplaySettings(s) {
+  try { localStorage.setItem(DISPLAY_SETTINGS_KEY, JSON.stringify(s)); } catch { /* stockage indisponible, tant pis pour la persistance */ }
+}
+
+function DisplaySettingsPanel({ onClose }) {
+  const [settings, setSettings] = useState(loadDisplaySettings());
+
+  const update = (patch) => {
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    applyDisplaySettings(next);
+    saveDisplaySettings(next);
+  };
+
+  const reset = () => {
+    setSettings(DEFAULT_DISPLAY_SETTINGS);
+    applyDisplaySettings(DEFAULT_DISPLAY_SETTINGS);
+    saveDisplaySettings(DEFAULT_DISPLAY_SETTINGS);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} className="rounded-lg p-5 w-full max-w-md" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
+        <div className="flex items-center justify-between mb-4">
+          <p className="smi-display text-xl">Paramètres d'affichage</p>
+          <button onClick={onClose} className="smi-btn" style={{ color: C.textMuted }}><X size={20} /></button>
+        </div>
+        <p className="text-xs mb-4" style={{ color: C.textFaint }}>Ces réglages sont personnels — gardés sur cet appareil uniquement, sans effet pour les autres utilisateurs.</p>
+
+        <div className="flex flex-col gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase mb-2" style={{ color: C.textMuted }}>Thème</p>
+            <div className="grid grid-cols-2 gap-2">
+              {[{ k: "sombre", label: "Sombre" }, { k: "clair", label: "Clair" }].map((t) => (
+                <button key={t.k} onClick={() => update({ theme: t.k })} className="smi-btn rounded-md py-2 text-sm" style={{ background: settings.theme === t.k ? C.amberSoft : C.bgAlt, border: `1px solid ${settings.theme === t.k ? C.amber : C.border}`, color: settings.theme === t.k ? C.amber : C.text }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold uppercase mb-2" style={{ color: C.textMuted }}>Taille du texte</p>
+            <div className="grid grid-cols-3 gap-2">
+              {[{ k: "petit", label: "Petit" }, { k: "normal", label: "Normal" }, { k: "grand", label: "Grand" }].map((t) => (
+                <button key={t.k} onClick={() => update({ taille: t.k })} className="smi-btn rounded-md py-2 text-sm" style={{ background: settings.taille === t.k ? C.amberSoft : C.bgAlt, border: `1px solid ${settings.taille === t.k ? C.amber : C.border}`, color: settings.taille === t.k ? C.amber : C.text }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold uppercase mb-2" style={{ color: C.textMuted }}>Couleur d'accent</p>
+            <div className="flex gap-2 flex-wrap">
+              {Object.entries(ACCENT_PRESETS).map(([k, hex]) => (
+                <button key={k} onClick={() => update({ accent: k })} aria-label={k} className="smi-btn rounded-full" style={{ width: 34, height: 34, background: hex, border: settings.accent === k ? `3px solid ${C.text}` : `1px solid ${C.border}` }} />
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold uppercase mb-2" style={{ color: C.textMuted }}>Police</p>
+            <SelectInput value={settings.police} onChange={(e) => update({ police: e.target.value })}>
+              <option value="inter">Inter (par défaut)</option>
+              <option value="systeme">Système (native de l'appareil)</option>
+              <option value="georgia">Georgia (classique)</option>
+              <option value="poppins">Poppins (moderne)</option>
+            </SelectInput>
+          </div>
+        </div>
+
+        <div className="flex justify-between items-center mt-5">
+          <button onClick={reset} className="smi-btn text-xs" style={{ color: C.textFaint }}>Réinitialiser</button>
+          <Button onClick={onClose}><CheckCircle2 size={16} /> Terminé</Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ---------------------------- Logo (mark) -------------------------------
@@ -496,7 +635,7 @@ function GaugeNumber({ value, unit, tone = "amber", size = "md" }) {
   return (
     <div
       className={`smi-mono inline-flex items-baseline gap-1 rounded px-2.5 py-1 font-bold ${size === "lg" ? "text-xl" : "text-sm"}`}
-      style={{ background: bg, color, border: `1px solid ${color}44` }}
+      style={{ background: bg, color, border: `1px solid color-mix(in srgb, ${color} 27%, transparent)` }}
     >
       <span>{value}</span>
       {unit && <span className="text-xs font-medium opacity-70">{unit}</span>}
@@ -507,7 +646,7 @@ function GaugeNumber({ value, unit, tone = "amber", size = "md" }) {
 function Pill({ children, tone = "muted" }) {
   const color = { muted: C.textMuted, amber: C.amber, teal: C.teal, danger: C.danger, success: C.success }[tone];
   return (
-    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold" style={{ color, background: `${color}1A`, border: `1px solid ${color}44` }}>
+    <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold" style={{ color, background: `color-mix(in srgb, ${color} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${color} 27%, transparent)` }}>
       {children}
     </span>
   );
@@ -1160,7 +1299,7 @@ function PartenairesView({ db, setDb, profile }) {
           <Card className="max-w-md">
             <p className="font-semibold text-sm mb-3">Nouvelle commande</p>
             {cEditingId && (
-              <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+              <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
                 <span className="text-xs" style={{ color: C.teal }}>Modification d'une commande existante</span>
                 <button onClick={resetCommandeForm} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
               </div>
@@ -1223,7 +1362,7 @@ function PartenairesView({ db, setDb, profile }) {
           <Card className="max-w-md">
             <p className="font-semibold text-sm mb-3">Nouveau versement</p>
             {vEditingId && (
-              <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+              <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
                 <span className="text-xs" style={{ color: C.teal }}>Modification d'un versement existant</span>
                 <button onClick={resetVersementForm} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
               </div>
@@ -1487,7 +1626,7 @@ function RelevePompesView({ db, setDb, profile }) {
             </div>
           )}
           {showGasoil && (
-            <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+            <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
               <p className="text-xs font-semibold uppercase mb-2 flex items-center gap-1.5" style={{ color: C.teal }}><Droplet size={13} /> Gasoil</p>
               <div className="grid grid-cols-2 gap-2">
                 <Field label="Index ouverture" hint={!existing && previousReleve ? "Repris de la clôture précédente" : undefined}><NumberInput value={idxOG} onChange={(e) => setIdxOG(e.target.value)} /></Field>
@@ -1613,7 +1752,7 @@ function VentesView({ db, setDb, profile }) {
             <div className="mt-2"><Field label={`Prix unitaire (${devise}/L)`}><NumberInput value={prixEssence} onChange={(e) => setPrixEssence(e.target.value)} /></Field></div>
             <p className="text-xs mt-2" style={{ color: C.textMuted }}>Montant : <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(preview.montantEssence, devise)}</span></p>
           </div>
-          <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+          <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
             <p className="text-xs font-semibold uppercase mb-2" style={{ color: C.teal }}>Gasoil</p>
             <p className="text-xs mb-1" style={{ color: C.textMuted }}>Volume (auto)</p>
             <GaugeNumber value={fmtVol(preview.gasoil)} tone="teal" />
@@ -2217,7 +2356,7 @@ function VersementView({ db, setDb, profile }) {
 
       <Card className="max-w-md smi-no-print">
         {editingId && (
-          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
             <span className="text-xs" style={{ color: C.teal }}>Modification d'un versement existant</span>
             <button onClick={reset} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
           </div>
@@ -2460,7 +2599,7 @@ function BonsView({ db, setDb, profile }) {
 
       <Card className="max-w-md smi-no-print">
         {editingId && (
-          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
             <span className="text-xs" style={{ color: C.teal }}>Modification d'un bon existant</span>
             <button onClick={reset} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
           </div>
@@ -2665,7 +2804,7 @@ function ReceptionView({ db, setDb, profile }) {
 
       <Card className="max-w-md smi-no-print">
         {editingId && (
-          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 33%, transparent)` }}>
             <span className="text-xs" style={{ color: C.teal }}>Modification d'une réception existante</span>
             <button onClick={reset} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
           </div>
@@ -3806,6 +3945,14 @@ const TABS = [
 export default function App() {
   const { db, setDb, profile, setProfile, ready, error, retrySave } = useSmiStorage();
   const [tab, setTab] = useState("guide");
+  const [showDisplaySettings, setShowDisplaySettings] = useState(false);
+
+  useEffect(() => {
+    // Réglages d'affichage personnels (thème, taille, couleur, police) — appliqués dès le
+    // premier rendu, avant même la connexion, pour que l'écran de connexion en profite
+    // aussi.
+    applyDisplaySettings(loadDisplaySettings());
+  }, []);
 
   useEffect(() => {
     // Le guide s'affiche en premier à chaque connexion, quel que soit le rôle — l'accès
@@ -3883,6 +4030,7 @@ export default function App() {
             <p className="font-semibold" style={{ color: C.textMuted }}>{profile.role === "admin" ? "Administrateur" : profile.role === "pompiste" ? "Pompiste" : "Gérant"}</p>
             {stationName && <p>{stationName}</p>}
           </div>
+          <Button variant="ghost" onClick={() => setShowDisplaySettings(true)}><Settings2 size={14} /> Affichage</Button>
           <Button variant="ghost" onClick={() => setProfile(null)}><LogOut size={14} /> Changer de profil</Button>
         </div>
       </aside>
@@ -3893,8 +4041,13 @@ export default function App() {
           <Logo size={24} />
           <p className="smi-display text-lg leading-none">SMI SARL</p>
         </div>
-        <button onClick={() => setProfile(null)} className="smi-btn" style={{ color: C.textMuted }}><LogOut size={16} /></button>
+        <div className="flex items-center gap-1">
+          <button onClick={() => setShowDisplaySettings(true)} className="smi-btn" style={{ color: C.textMuted }}><Settings2 size={16} /></button>
+          <button onClick={() => setProfile(null)} className="smi-btn" style={{ color: C.textMuted }}><LogOut size={16} /></button>
+        </div>
       </header>
+
+      {showDisplaySettings && <DisplaySettingsPanel onClose={() => setShowDisplaySettings(false)} />}
 
       <main className="flex-1 p-4 md:p-8 pb-24 md:pb-8 overflow-y-auto">
         {error && (
