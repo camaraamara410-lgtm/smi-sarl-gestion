@@ -263,7 +263,13 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
   // versée avant la fin de journée, par exemple) — cet argent sort donc réellement du
   // tiroir le jour même. Le versement du jour se déduit désormais de la caisse attendue,
   // au même titre que le Bon et le Paiement marchand.
-  const caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand - totalVersement;
+  let caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand - totalVersement;
+  // Cas normal, pas une erreur : la caisse peut rester plusieurs jours sans être versée
+  // (2, 3, 4 jours...), puis être versée en une seule fois — ce versement dépasse alors
+  // forcément le CA d'un seul jour. Dans ce cas, on ne peut plus dire ce qu'il reste
+  // précisément dans le tiroir avec les seules données de ce jour-là ; on retient
+  // simplement le CA du jour comme caisse attendue, plutôt qu'un négatif trompeur.
+  if (caisseAttendue < 0) caisseAttendue = ca;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
   return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
@@ -3506,7 +3512,7 @@ function RapportJournalierView({ db, profile }) {
                     </tbody>
                   </table>
                 </div>
-                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Chiffre d'affaires du jour − Total Bon − Paiement marchand − Total Versement (un versement peut être fait en cours de journée, l'argent sort donc réellement de la caisse)</p>
+                <p className="text-[10px] italic mt-2" style={{ color: C.textFaint }}>Caisse Attendue = Caisse Précédente + Chiffre d'affaires du jour − Total Bon − Paiement marchand − Total Versement (un versement peut être fait en cours de journée, l'argent sort donc réellement de la caisse). Si la caisse est restée plusieurs jours sans être versée puis versée en une fois, le calcul retient le CA du jour comme caisse attendue, plutôt qu'un résultat négatif trompeur.</p>
               </>
             )}
           </Card>
