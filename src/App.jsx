@@ -1801,9 +1801,21 @@ function StockView({ db, setDb, profile }) {
       setLivE(s.record.livraisonEssence ?? ""); setLivG(s.record.livraisonGasoil ?? "");
       setPhysE(s.record.stockPhysiqueEssence ?? ""); setPhysG(s.record.stockPhysiqueGasoil ?? "");
     } else {
-      setOuvE(prevComputed ? String(prevComputed.stockClotureEssence) : "");
-      setOuvG(prevComputed ? String(prevComputed.stockClotureGasoil) : "");
-      setLivE(""); setLivG(""); setPhysE(""); setPhysG("");
+      // Le stock d'ouverture du jour reprend le stock PHYSIQUE constaté la veille (pas le
+      // stock théorique calculé) — pour que le comptage réel serve de référence d'un jour
+      // sur l'autre, sans laisser un écart non constaté se perpétuer silencieusement. À
+      // défaut de comptage physique la veille, on retombe sur le stock de clôture calculé.
+      const ouvertureEssence = (prevClose?.stockPhysiqueEssence !== undefined && prevClose?.stockPhysiqueEssence !== "")
+        ? String(prevClose.stockPhysiqueEssence) : (prevComputed ? String(prevComputed.stockClotureEssence) : "");
+      const ouvertureGasoil = (prevClose?.stockPhysiqueGasoil !== undefined && prevClose?.stockPhysiqueGasoil !== "")
+        ? String(prevClose.stockPhysiqueGasoil) : (prevComputed ? String(prevComputed.stockClotureGasoil) : "");
+      setOuvE(ouvertureEssence);
+      setOuvG(ouvertureGasoil);
+      setLivE(""); setLivG("");
+      // Comptage physique du jour pré-rempli avec ce même point de départ — à corriger
+      // selon le comptage réel une fois les livraisons et ventes du jour prises en compte.
+      setPhysE(ouvertureEssence);
+      setPhysG(ouvertureGasoil);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
@@ -1828,7 +1840,7 @@ function StockView({ db, setDb, profile }) {
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Contrôle Stock</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Stock de clôture calculé automatiquement ; le comptage physique révèle l'écart.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Stock de clôture calculé automatiquement ; le comptage physique du jour devient le stock d'ouverture du lendemain.</p>
       </div>
 
       <Card>
@@ -1843,13 +1855,13 @@ function StockView({ db, setDb, profile }) {
           <div key={r.key} className="rounded-md p-3 mb-3" style={{ background: r.tone === "amber" ? C.amberSoft : C.tealSoft, border: `1px solid ${r.tone === "amber" ? C.amberDim : C.teal + "55"}` }}>
             <p className="text-xs font-semibold uppercase mb-2" style={{ color: r.tone === "amber" ? C.amber : C.teal }}>{r.key}</p>
             <div className="grid sm:grid-cols-4 gap-2 items-end">
-              <Field label="Stock ouverture (L)"><NumberInput value={r.ouv} onChange={(e) => r.setOuv(e.target.value)} /></Field>
+              <Field label="Stock ouverture (L)" hint="Repris du stock physique constaté la veille"><NumberInput value={r.ouv} onChange={(e) => r.setOuv(e.target.value)} /></Field>
               <Field label="Livraison (L)"><NumberInput value={r.liv} onChange={(e) => r.setLiv(e.target.value)} /></Field>
               <Field label="Ventes du jour (auto)"><div className="pt-1"><GaugeNumber value={fmtVol(r.vente)} tone={r.tone} /></div></Field>
               <Field label="Stock clôture (auto)"><div className="pt-1"><GaugeNumber value={fmtVol(r.close)} tone={r.tone} /></div></Field>
             </div>
             <div className="grid sm:grid-cols-2 gap-2 mt-2">
-              <Field label="Comptage physique (L)" hint="Optionnel — active le calcul d'écart"><NumberInput value={r.phys} onChange={(e) => r.setPhys(e.target.value)} /></Field>
+              <Field label="Comptage physique (L)" hint="Deviendra le stock d'ouverture du lendemain — à corriger selon le comptage réel du jour"><NumberInput value={r.phys} onChange={(e) => r.setPhys(e.target.value)} /></Field>
               <Field label="Écart constaté (auto)">
                 <div className="pt-1"><GaugeNumber value={fmtEcart(r.ecart)} tone={r.ecart !== null && Math.abs(r.ecart) > 0.001 ? "danger" : "muted"} /></div>
               </Field>
@@ -2507,6 +2519,15 @@ function VersementView({ db, setDb, profile }) {
 
 /* ----------------------------------- Bons view -------------------------------- */
 
+// Catégorie déduite automatiquement du libellé déjà saisi (pas de champ séparé à
+// remplir) — "citerne" d'un côté, "groupe"/"transport"/"vidange" de l'autre. Les frais de
+// route suivent la même catégorie que le bon auquel ils sont rattachés.
+function bonCategorie(b) {
+  const l = (b.libelle || "").toLowerCase();
+  if (l.includes("groupe") || l.includes("transport") || l.includes("vidange")) return "groupe_transport_vidange";
+  return "citerne";
+}
+
 function BonsView({ db, setDb, profile }) {
   const isGerant = profile.role === "gerant";
   const [stationId, setStationId] = useState(isGerant ? profile.stationId : (db.stations[0]?.id || ""));
@@ -2599,10 +2620,13 @@ function BonsView({ db, setDb, profile }) {
   }, [history, db.stations]);
 
   // Cumul automatique sur toute la période affichée — recalculé dès qu'un bon est ajouté
-  // ou supprimé, puisqu'il est dérivé directement de l'historique filtré.
+  // ou supprimé, puisqu'il est dérivé directement de l'historique filtré. La catégorie
+  // (Citerne / Groupe-Transport-Vidange) est déduite automatiquement du libellé déjà
+  // saisi, sans champ supplémentaire — les frais de route de chaque bon suivent sa
+  // catégorie plutôt que d'être comptés à part.
   const cumulTotal = history.reduce((a, b) => a + bonTotal(b), 0);
-  const cumulBon = history.reduce((a, b) => a + num(b.quantite) * num(b.prixUnitaire), 0);
-  const cumulFraisRoute = history.reduce((a, b) => a + num(b.fraisRoute), 0);
+  const cumulCiterne = history.filter((b) => bonCategorie(b) === "citerne").reduce((a, b) => a + bonTotal(b), 0);
+  const cumulGroupeTransport = history.filter((b) => bonCategorie(b) === "groupe_transport_vidange").reduce((a, b) => a + bonTotal(b), 0);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2629,7 +2653,7 @@ function BonsView({ db, setDb, profile }) {
         </div>
 
         <div className="flex flex-col gap-3">
-          <Field label="Libellé">
+          <Field label="Libellé" hint="Utilisez « Citerne » ou « Groupe / Transport / Vidange » dans le libellé pour un classement automatique correct dans les cumuls.">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="ex : Citerne BI 7077" />
           </Field>
           <div className="grid sm:grid-cols-3 gap-3">
@@ -2676,12 +2700,12 @@ function BonsView({ db, setDb, profile }) {
               <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" />
             </div>
             <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Bon (qté × prix)</p>
-              <GaugeNumber value={fmtMontant(cumulBon, devise)} />
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Citerne</p>
+              <GaugeNumber value={fmtMontant(cumulCiterne, devise)} />
             </div>
             <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul frais de route</p>
-              <GaugeNumber value={fmtMontant(cumulFraisRoute, devise)} />
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Groupe/Transport/Vidange</p>
+              <GaugeNumber value={fmtMontant(cumulGroupeTransport, devise)} />
             </div>
           </div>
         )}
@@ -2715,7 +2739,8 @@ function BonsView({ db, setDb, profile }) {
                             <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 40, height: 40, background: C.panel, border: `1px solid ${C.border}`, color: C.textFaint }}><Wallet size={16} /></div>
                           )}
                           <div className="flex-1 min-w-0 text-xs" style={{ color: C.textMuted }}>
-                            <span className="font-medium" style={{ color: C.text }}>{b.libelle}</span>
+                            <span className="font-medium" style={{ color: C.text }}>{b.libelle}</span>{" "}
+                            <Pill tone={bonCategorie(b) === "groupe_transport_vidange" ? "teal" : "amber"}>{bonCategorie(b) === "groupe_transport_vidange" ? "Groupe/Transport/Vidange" : "Citerne"}</Pill>
                             {num(b.quantite) > 0 && <span> · {fmtVol(b.quantite)} × {fmtMontant(b.prixUnitaire, dv)}</span>}
                             {num(b.fraisRoute) > 0 && <span> · Frais : {fmtMontant(b.fraisRoute, dv)}</span>}
                           </div>
@@ -4038,7 +4063,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stock", title: "Contrôle Stock", adminOnly: false,
-    text: "Le stock d'ouverture reprend automatiquement la clôture de la veille. Indiquez les livraisons reçues et le stock physique mesuré (par jaugeage) : l'écart entre stock théorique et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
+    text: "Le stock d'ouverture du jour reprend automatiquement le stock PHYSIQUE constaté la veille (pas le stock théorique) — pour que le comptage réel serve de référence d'un jour sur l'autre. Le comptage physique du jour est pré-rempli avec ce même point de départ ; corrigez-le selon le comptage réel une fois les livraisons et ventes prises en compte, puisqu'il deviendra à son tour le stock d'ouverture du lendemain. L'écart entre stock théorique calculé et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
   },
   {
     key: "caisse", title: "Caisse", adminOnly: false,
