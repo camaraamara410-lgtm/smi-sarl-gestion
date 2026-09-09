@@ -61,9 +61,9 @@ const FONTS = `
 .smi-live { animation: smiPulse 2.2s ease-in-out infinite; }
 .smi-print-only { display: none; }
 @media print {
-  body * { visibility: hidden; }
-  .smi-print-area, .smi-print-area * { visibility: visible; }
-  .smi-print-area { position: absolute; top: 0; left: 0; width: 100%; }
+  /* Technique display:none (plutôt que visibility:hidden) — plus fiable sur mobile,
+     certains navigateurs ayant des bugs d'affichage (valeurs à zéro, contenu perdu) avec
+     visibility:hidden combiné à des tableaux complexes lors de l'impression. */
   .smi-no-print { display: none !important; }
   .smi-print-only { display: block !important; }
   .smi-print-area, .smi-print-area * { background: #fff !important; color: #111 !important; border-color: #ccc !important; box-shadow: none !important; }
@@ -144,7 +144,7 @@ function DisplaySettingsPanel({ onClose }) {
   };
 
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div onClick={onClose} className="smi-no-print" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} className="rounded-lg p-5 w-full max-w-md" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
         <div className="flex items-center justify-between mb-4">
           <p className="smi-display text-xl">Paramètres d'affichage</p>
@@ -373,11 +373,20 @@ function computeStock(releves, stocks, stationId, date) {
   return { record: s.id ? s : null, vol, stockOuvertureEssence, stockOuvertureGasoil, livraisonEssence, livraisonGasoil, stockClotureEssence, stockClotureGasoil, stockPhysiqueEssence, stockPhysiqueGasoil, ecartEssence, ecartGasoil };
 }
 
+// Les rapports affichent le stock physique constaté (jaugeage) quand il existe — plus
+// fidèle à la réalité que le stock théorique calculé — et ne retombent sur le calculé
+// qu'à défaut de comptage physique pour ce jour-là.
+function stockAffichable(s, produit) {
+  const phys = produit === "essence" ? s.stockPhysiqueEssence : s.stockPhysiqueGasoil;
+  const close = produit === "essence" ? s.stockClotureEssence : s.stockClotureGasoil;
+  return phys !== null && phys !== undefined ? phys : close;
+}
+
 function sumBons(bons) {
   return (bons || []).reduce((a, b) => a + num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute), 0);
 }
 function sumVersements(versements) {
-  return (versements || []).reduce((a, v) => a + num(v.versementBancaire) + num(v.codeMarchand) + num(v.autreVersement), 0);
+  return (versements || []).reduce((a, v) => a + num(v.banqueMontant) + num(v.paiementMarchandMontant) + num(v.autreMontant), 0);
 }
 
 function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stationId, date) {
@@ -676,6 +685,7 @@ function ImageLightbox({ src, onClose }) {
   return (
     <div
       onClick={onClose}
+      className="smi-no-print"
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
     >
       <button onClick={(e) => { e.stopPropagation(); printPhoto(); }} className="smi-btn" style={{ position: "absolute", top: 16, right: 64, color: "#fff" }} aria-label="Imprimer">
@@ -3163,8 +3173,8 @@ function DashboardView({ db }) {
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
                   {r.stock ? (
                     <div className="flex flex-col gap-1 mt-1">
-                      <GaugeNumber value={`E ${fmtVol(r.stock.stockClotureEssence)}`} tone="amber" />
-                      <GaugeNumber value={`G ${fmtVol(r.stock.stockClotureGasoil)}`} tone="teal" />
+                      <GaugeNumber value={`E ${fmtVol(stockAffichable(r.stock, "essence"))}`} tone="amber" />
+                      <GaugeNumber value={`G ${fmtVol(stockAffichable(r.stock, "gasoil"))}`} tone="teal" />
                     </div>
                   ) : <p className="text-xs mt-1" style={{ color: C.textFaint }}>Aucun contrôle</p>}
                 </div>
@@ -3243,6 +3253,17 @@ function RapportHebdomadaireView({ db, profile }) {
 
   const totalBons = bonsSemaine.reduce((a, b) => a + bonTotal(b), 0);
 
+  // Stock d'ouverture de la semaine : premier contrôle de stock enregistré à partir du
+  // lundi (à défaut, le plus récent avant cette date — donc la clôture du vendredi
+  // précédent, par exemple).
+  const stockDebutSemaine = useMemo(() => {
+    if (!stationId) return null;
+    const record = [...db.stocks].filter((s) => s.stationId === stationId && s.date >= start).sort((a, b) => (a.date < b.date ? -1 : 1))[0]
+      || [...db.stocks].filter((s) => s.stationId === stationId && s.date < start).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    if (!record) return null;
+    return { ...computeStock(db.releves, db.stocks, stationId, record.date), date: record.date };
+  }, [stationId, start, db.stocks, db.releves]);
+
   // Stock restant en fin de semaine : dernier contrôle de stock enregistré au plus tard
   // le dimanche de la semaine visée (à défaut, le plus récent avant cette date).
   const stockFinSemaine = useMemo(() => {
@@ -3257,7 +3278,7 @@ function RapportHebdomadaireView({ db, profile }) {
       <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
         <div>
           <h2 className="smi-display text-2xl">Rapport hebdomadaire</h2>
-          <p className="text-sm" style={{ color: C.textMuted }}>Ventes, versements, bons, livraisons et stock restant sur la semaine (lundi à dimanche).</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>Ventes, versements, bons, livraisons, stock d'ouverture et stock restant sur la semaine (lundi à dimanche).</p>
         </div>
         <Button variant="ghost" onClick={exportPdf}><Printer size={16} /> Exporter en PDF</Button>
       </div>
@@ -3408,22 +3429,42 @@ function RapportHebdomadaireView({ db, profile }) {
           </div>
         )}
 
-        <p className="text-sm font-semibold mb-2 mt-3">5. Stock restant en fin de semaine</p>
+        <p className="text-sm font-semibold mb-2 mt-3">5. Stock d'ouverture de la semaine</p>
+        {!stockDebutSemaine ? (
+          <p className="text-xs mb-4" style={{ color: C.textFaint }}>Aucun contrôle de stock enregistré autour du {fmtDateLong(start)}.</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 max-w-sm mb-4">
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Essence</p>
+              <GaugeNumber value={fmtVol(stockDebutSemaine.stockOuvertureEssence)} tone="amber" />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Gasoil</p>
+              <GaugeNumber value={fmtVol(stockDebutSemaine.stockOuvertureGasoil)} tone="teal" />
+            </div>
+            {stockDebutSemaine.date !== start && (
+              <p className="text-xs col-span-2" style={{ color: C.textFaint }}>Contrôle de référence : {fmtDateLong(stockDebutSemaine.date)} (pas de contrôle exactement le {fmtDateLong(start)}).</p>
+            )}
+          </div>
+        )}
+
+        <p className="text-sm font-semibold mb-2 mt-3">6. Stock restant en fin de semaine</p>
         {!stockFinSemaine ? (
           <p className="text-xs" style={{ color: C.textFaint }}>Aucun contrôle de stock enregistré au plus tard le {fmtDateLong(end)}.</p>
         ) : (
           <div className="grid grid-cols-2 gap-3 max-w-sm">
             <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
               <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Essence</p>
-              <GaugeNumber value={fmtVol(stockFinSemaine.stockClotureEssence)} tone="amber" />
+              <GaugeNumber value={fmtVol(stockAffichable(stockFinSemaine, "essence"))} tone="amber" />
             </div>
             <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
               <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Gasoil</p>
-              <GaugeNumber value={fmtVol(stockFinSemaine.stockClotureGasoil)} tone="teal" />
+              <GaugeNumber value={fmtVol(stockAffichable(stockFinSemaine, "gasoil"))} tone="teal" />
             </div>
             {stockFinSemaine.date !== end && (
               <p className="text-xs col-span-2" style={{ color: C.textFaint }}>Dernier contrôle disponible : {fmtDateLong(stockFinSemaine.date)} (pas de contrôle exactement le {fmtDateLong(end)}).</p>
             )}
+            <p className="text-[10px] italic col-span-2" style={{ color: C.textFaint }}>Comptage physique constaté si renseigné, sinon stock théorique calculé.</p>
           </div>
         )}
 
@@ -3491,7 +3532,7 @@ function RapportMensuelView({ db }) {
     results.forEach((r) => rows.push([
       r.station.nom, r.station.devise || "GNF", r.vEssence.toFixed(2), r.vGasoil.toFixed(2), (r.vEssence + r.vGasoil).toFixed(2), r.ca.toFixed(2),
       r.totalVersements.toFixed(2), r.totalBons.toFixed(2), r.derniereCaisse.toFixed(2),
-      r.stock ? r.stock.stockClotureEssence.toFixed(2) : "", r.stock ? r.stock.stockClotureGasoil.toFixed(2) : "",
+      r.stock ? stockAffichable(r.stock, "essence").toFixed(2) : "", r.stock ? stockAffichable(r.stock, "gasoil").toFixed(2) : "",
     ]));
     if (stationId && results[0]) {
       rows.push([]);
@@ -3574,7 +3615,7 @@ function RapportMensuelView({ db }) {
                     <td className="py-1.5 text-right smi-mono">{fmtMontant(r.totalVersements, dv)}</td>
                     <td className="py-1.5 text-right smi-mono">{fmtMontant(r.totalBons, dv)}</td>
                     <td className="py-1.5 text-right smi-mono font-semibold" style={{ color: r.derniereCaisse < 0 ? C.danger : C.text }}>{fmtMontant(r.derniereCaisse, dv)}</td>
-                    <td className="py-1.5 text-right smi-mono">{r.stock ? `${fmtVol(r.stock.stockClotureEssence)} / ${fmtVol(r.stock.stockClotureGasoil)}` : "—"}</td>
+                    <td className="py-1.5 text-right smi-mono">{r.stock ? `${fmtVol(stockAffichable(r.stock, "essence"))} / ${fmtVol(stockAffichable(r.stock, "gasoil"))}` : "—"}</td>
                   </tr>
                 );
               })}
@@ -3851,18 +3892,19 @@ function RapportJournalierView({ db, profile }) {
                       <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureEssence)}</td>
                       <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.essence)}</td>
                       <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonEssence)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockClotureEssence)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockAffichable(stockJour, "essence"))}</td>
                     </tr>
                     <tr>
                       <td className="py-1">Gasoil</td>
                       <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureGasoil)}</td>
                       <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.gasoil)}</td>
                       <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonGasoil)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockClotureGasoil)}</td>
+                      <td className="py-1 text-right smi-mono">{fmtVol(stockAffichable(stockJour, "gasoil"))}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
+              <p className="text-[10px] italic mt-1" style={{ color: C.textFaint }}>Stock clôture = comptage physique constaté (jaugeage), quand il est renseigné ce jour-là — sinon, stock théorique calculé (ouverture + livraisons − ventes).</p>
             )}
 
             <p className="text-sm font-semibold mt-5 mb-2">3. Coupon de Bon, Versement et Caisse</p>
@@ -4091,7 +4133,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "rapport_hebdo", title: "Rapport hebdomadaire", adminOnly: false,
-    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG), bons de la semaine, livraisons reçues, et stock restant au dimanche. Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
+    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG), bons de la semaine, livraisons reçues, stock d'ouverture (lundi) et stock restant (dimanche). Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
@@ -4323,7 +4365,7 @@ export default function App() {
       <StyleInjector />
 
       {/* Sidebar (desktop) */}
-      <aside className="hidden md:flex md:flex-col w-64 shrink-0 p-4 gap-4" style={{ background: C.bgAlt, borderRight: `1px solid ${C.border}` }}>
+      <aside className="hidden md:flex md:flex-col w-64 shrink-0 p-4 gap-4 smi-no-print" style={{ background: C.bgAlt, borderRight: `1px solid ${C.border}` }}>
         <div className="flex items-center gap-2 px-1">
           <Logo size={30} />
           <div>
@@ -4354,7 +4396,7 @@ export default function App() {
       </aside>
 
       {/* Mobile header */}
-      <header className="md:hidden flex items-center justify-between px-4 py-3" style={{ background: C.bgAlt, borderBottom: `1px solid ${C.border}` }}>
+      <header className="md:hidden flex items-center justify-between px-4 py-3 smi-no-print" style={{ background: C.bgAlt, borderBottom: `1px solid ${C.border}` }}>
         <div className="flex items-center gap-2">
           <Logo size={24} />
           <p className="smi-display text-lg leading-none">SMI SARL</p>
@@ -4378,7 +4420,7 @@ export default function App() {
       </main>
 
       {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 flex overflow-x-auto smi-scroll" style={{ background: C.bgAlt, borderTop: `1px solid ${C.border}` }}>
+      <nav className="md:hidden fixed bottom-0 inset-x-0 flex overflow-x-auto smi-scroll smi-no-print" style={{ background: C.bgAlt, borderTop: `1px solid ${C.border}` }}>
         {visibleTabs.map((t) => (
           <button
             key={t.key}
