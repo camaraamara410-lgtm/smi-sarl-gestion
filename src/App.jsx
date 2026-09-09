@@ -3875,36 +3875,38 @@ function RapportJournalierView({ db, profile }) {
 
             <p className="text-sm font-semibold mt-5 mb-2">2. Stock carburant</p>
             {stockJour && (
-              <div className="overflow-x-auto smi-scroll">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                      <th className="text-left py-1" style={{ color: C.textMuted }}>Produit</th>
-                      <th className="text-right py-1" style={{ color: C.textMuted }}>Stock ouverture (L)</th>
-                      <th className="text-right py-1" style={{ color: C.textMuted }}>Ventes (L)</th>
-                      <th className="text-right py-1" style={{ color: C.textMuted }}>Livraisons (L)</th>
-                      <th className="text-right py-1" style={{ color: C.textMuted }}>Stock clôture (L)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                      <td className="py-1">Essence</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureEssence)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.essence)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonEssence)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockAffichable(stockJour, "essence"))}</td>
-                    </tr>
-                    <tr>
-                      <td className="py-1">Gasoil</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureGasoil)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.gasoil)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonGasoil)}</td>
-                      <td className="py-1 text-right smi-mono">{fmtVol(stockAffichable(stockJour, "gasoil"))}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <p className="text-[10px] italic mt-1" style={{ color: C.textFaint }}>Stock clôture = comptage physique constaté (jaugeage), quand il est renseigné ce jour-là — sinon, stock théorique calculé (ouverture + livraisons − ventes).</p>
+              <>
+                <div className="overflow-x-auto smi-scroll">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <th className="text-left py-1" style={{ color: C.textMuted }}>Produit</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Stock ouverture (L)</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Ventes (L)</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Livraisons (L)</th>
+                        <th className="text-right py-1" style={{ color: C.textMuted }}>Stock clôture (L)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <td className="py-1">Essence</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureEssence)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.essence)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonEssence)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockAffichable(stockJour, "essence"))}</td>
+                      </tr>
+                      <tr>
+                        <td className="py-1">Gasoil</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockJour.stockOuvertureGasoil)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockJour.vol.gasoil)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockJour.livraisonGasoil)}</td>
+                        <td className="py-1 text-right smi-mono">{fmtVol(stockAffichable(stockJour, "gasoil"))}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[10px] italic mt-1" style={{ color: C.textFaint }}>Stock clôture = comptage physique constaté (jaugeage), quand il est renseigné ce jour-là — sinon, stock théorique calculé (ouverture + livraisons − ventes).</p>
+              </>
             )}
 
             <p className="text-sm font-semibold mt-5 mb-2">3. Coupon de Bon, Versement et Caisse</p>
