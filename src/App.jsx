@@ -1003,6 +1003,9 @@ function StationsView({ db, setDb, profile }) {
             <Field label="Fournisseur carburant"><TextInput value={form.fournisseur || ""} onChange={(e) => setForm({ ...form, fournisseur: e.target.value })} placeholder="Ex. Total Guinée" /></Field>
             <Field label="Localisation"><TextInput value={form.localisation || ""} onChange={(e) => setForm({ ...form, localisation: e.target.value })} placeholder="Ex. Conakry, Kaloum" /></Field>
             <Field label="Devise"><TextInput value={form.devise ?? "GNF"} onChange={(e) => setForm({ ...form, devise: e.target.value })} /></Field>
+            <Field label="Fond de roulement (L)" hint="Seuil minimum de stock total (essence + gasoil) à maintenir — sert à alerter avant une rupture.">
+              <NumberInput value={form.fondRoulement ?? ""} onChange={(e) => setForm({ ...form, fondRoulement: e.target.value })} />
+            </Field>
             <Field label={form.pinHash ? "Changer le code PIN de la station" : "Code PIN de la station (optionnel, non utilisé pour les gérants)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver." : "Réservé à un usage futur — les gérants se connectent désormais avec un compte individuel (voir plus bas)."}>
               <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pinInput} onChange={(e) => setPinInput(e.target.value)} placeholder="••••" />
             </Field>
@@ -1031,6 +1034,7 @@ function StationsView({ db, setDb, profile }) {
                 </div>
                 <p className="text-xs" style={{ color: C.textFaint }}>Fournisseur : {s.fournisseur || "—"}</p>
                 <p className="text-xs" style={{ color: C.textFaint }}>{db.pompes.filter((p) => p.stationId === s.id).length} pompe(s)</p>
+                {s.fondRoulement && <p className="text-xs" style={{ color: C.textFaint }}>Fond de roulement : {fmtVol(num(s.fondRoulement))} L</p>}
                 <div className="text-xs" style={{ color: C.textFaint }}>
                   {gerantsDeCetteStation.length === 0 ? (
                     <span>Aucun gérant enregistré</span>
@@ -3140,8 +3144,39 @@ function DashboardView({ db }) {
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, lastCaisseDate) : null;
     const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements };
+
+    // Rythme de vente moyen sur les 7 derniers jours (essence + gasoil confondus) — sert
+    // de base pour estimer combien de jours il reste avant une rupture de stock.
+    let rythme7j = 0;
+    const today = new Date(`${todayISO()}T00:00:00`);
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const v = computeVente(db.releves, db.ventes, s.id, dateStr);
+      rythme7j += v.essence + v.gasoil;
+    }
+    rythme7j = rythme7j / 7;
+
+    const stockTotalActuel = stock ? stockAffichable(stock, "essence") + stockAffichable(stock, "gasoil") : null;
+    const fondRoulement = num(s.fondRoulement);
+    const joursAvantRupture = stockTotalActuel !== null && rythme7j > 0 ? stockTotalActuel / rythme7j : null;
+
+    let statutStock = null;
+    if (fondRoulement > 0 && stockTotalActuel !== null) {
+      if (stockTotalActuel < fondRoulement || (joursAvantRupture !== null && joursAvantRupture <= 3)) {
+        statutStock = "alerte";
+      } else if (stockTotalActuel < fondRoulement * 1.2) {
+        statutStock = "attention";
+      } else {
+        statutStock = "ok";
+      }
+    }
+
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, monthPrefix]);
+
+  const stationsEnAlerte = rows.filter((r) => r.statutStock === "alerte");
 
   return (
     <div className="flex flex-col gap-4">
@@ -3150,12 +3185,21 @@ function DashboardView({ db }) {
         <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}), station par station — mise à jour automatique à chaque saisie.</p>
       </div>
 
+      {stationsEnAlerte.length > 0 && (
+        <Card style={{ background: C.dangerSoft, border: `1px solid ${C.danger}` }}>
+          <p className="text-sm font-semibold flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={16} /> {stationsEnAlerte.length} station{stationsEnAlerte.length > 1 ? "s" : ""} sous le fond de roulement — commande à déclencher</p>
+          <p className="text-xs mt-1" style={{ color: C.danger }}>{stationsEnAlerte.map((r) => r.station.nom).join(", ")}</p>
+        </Card>
+      )}
+
       {db.stations.length === 0 ? (
         <EmptyState icon={LayoutDashboard} title="Aucune donnée à afficher" hint="Ajoutez des stations et saisissez des relevés pour alimenter le tableau de bord." />
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {rows.map((r) => {
             const devise = r.station.devise || "GNF";
+            const statutColor = r.statutStock === "alerte" ? C.danger : r.statutStock === "attention" ? C.amber : r.statutStock === "ok" ? C.success : C.textFaint;
+            const statutLabel = r.statutStock === "alerte" ? "Commander maintenant" : r.statutStock === "attention" ? "À surveiller" : r.statutStock === "ok" ? "Stock suffisant" : "Fond de roulement non défini";
             return (
             <Card key={r.station.id} className="flex flex-col gap-3 smi-live" style={{ animationName: "none" }}>
               <div className="flex items-center justify-between">
@@ -3182,6 +3226,33 @@ function DashboardView({ db }) {
                   <p className="text-xs" style={{ color: C.textFaint }}>Dernière caisse {r.caisseDate ? `(${fmtDateLong(r.caisseDate)})` : ""}</p>
                   {r.caisse ? <div className="mt-1"><GaugeNumber value={fmtMontant(r.caisse.caisseAttendue, devise)} /></div> : <p className="text-xs mt-1" style={{ color: C.textFaint }}>Aucune caisse</p>}
                 </div>
+              </div>
+
+              <div className="rounded-md p-3 mt-1" style={{ background: `color-mix(in srgb, ${statutColor} 12%, transparent)`, border: `1px solid ${statutColor}` }}>
+                <p className="text-xs uppercase font-semibold mb-1" style={{ color: statutColor }}>Fond de roulement</p>
+                {r.fondRoulement > 0 ? (
+                  <>
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-xs" style={{ color: C.textFaint }}>Stock total actuel</span>
+                      <span className="smi-mono text-sm font-semibold">{r.stockTotalActuel !== null ? fmtVol(r.stockTotalActuel) : "—"} L</span>
+                    </div>
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-xs" style={{ color: C.textFaint }}>Seuil (fond de roulement)</span>
+                      <span className="smi-mono text-sm">{fmtVol(r.fondRoulement)} L</span>
+                    </div>
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-xs" style={{ color: C.textFaint }}>Rythme de vente (7 j)</span>
+                      <span className="smi-mono text-sm">{fmtVol(r.rythme7j)} L/j</span>
+                    </div>
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-xs" style={{ color: C.textFaint }}>Jours avant rupture (estimé)</span>
+                      <span className="smi-mono text-sm font-semibold" style={{ color: statutColor }}>{r.joursAvantRupture !== null ? `${r.joursAvantRupture.toFixed(1)} j` : "—"}</span>
+                    </div>
+                    <p className="text-xs font-semibold mt-1.5" style={{ color: statutColor }}>{statutLabel}</p>
+                  </>
+                ) : (
+                  <p className="text-xs" style={{ color: C.textFaint }}>Définissez le fond de roulement de cette station dans l'onglet Stations.</p>
+                )}
               </div>
             </Card>
           );})}
@@ -4139,7 +4210,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
-    text: "Vue d'ensemble du réseau : volumes et chiffre d'affaires du mois en cours, station par station, mis à jour automatiquement à chaque saisie d'un gérant.",
+    text: "Vue d'ensemble du réseau : volumes et chiffre d'affaires du mois en cours, station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture — avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
