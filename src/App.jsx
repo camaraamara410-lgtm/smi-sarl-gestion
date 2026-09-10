@@ -3262,6 +3262,148 @@ function DashboardView({ db }) {
   );
 }
 
+/* ------------------------------- Commandes réseau ------------------------------ */
+
+// Recommandation de quantité à commander par station — croise stock physique actuel,
+// fond de roulement (seuil cible), rythme de vente récent (essence/gasoil), et versements
+// du mois (indicateur de capacité de financement), sans imposer de champ supplémentaire :
+// tout est dérivé des saisies déjà existantes (Stock, Ventes, Versement, Stations).
+const DELAI_LIVRAISON_JOURS = 3; // hypothèse : temps estimé entre commande et livraison
+
+function CommandesReseauView({ db }) {
+  const monthPrefix = todayISO().slice(0, 7);
+
+  const rows = useMemo(() => db.stations.map((s) => {
+    const lastStockDate = [...db.stocks].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
+    const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
+
+    // Rythme de vente moyen sur 7 jours, par produit — sert à la fois à estimer les jours
+    // avant rupture et à répartir le fond de roulement (donné en un seul chiffre total)
+    // entre essence et gasoil, au prorata de ce qui se vend réellement.
+    let rE = 0, rG = 0;
+    const today = new Date(`${todayISO()}T00:00:00`);
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const v = computeVente(db.releves, db.ventes, s.id, dateStr);
+      rE += v.essence; rG += v.gasoil;
+    }
+    rE /= 7; rG /= 7;
+    const rTotal = rE + rG;
+    const partE = rTotal > 0 ? rE / rTotal : 0.5;
+    const partG = rTotal > 0 ? rG / rTotal : 0.5;
+
+    const fondRoulement = num(s.fondRoulement);
+    const fondRoulementE = fondRoulement * partE;
+    const fondRoulementG = fondRoulement * partG;
+
+    const stockE = stock ? stockAffichable(stock, "essence") : null;
+    const stockG = stock ? stockAffichable(stock, "gasoil") : null;
+
+    // Quantité suggérée = ce qui manque pour revenir au fond de roulement, plus une
+    // marge couvrant la vente pendant le délai de livraison estimé.
+    const manqueE = stockE !== null ? Math.max(0, fondRoulementE - stockE) : null;
+    const manqueG = stockG !== null ? Math.max(0, fondRoulementG - stockG) : null;
+    const suggEssence = manqueE !== null ? manqueE + rE * DELAI_LIVRAISON_JOURS : null;
+    const suggGasoil = manqueG !== null ? manqueG + rG * DELAI_LIVRAISON_JOURS : null;
+    const suggTotal = suggEssence !== null && suggGasoil !== null ? suggEssence + suggGasoil : null;
+
+    const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
+    const stockTotalActuel = stockE !== null && stockG !== null ? stockE + stockG : null;
+    const joursAvantRupture = stockTotalActuel !== null && rTotal > 0 ? stockTotalActuel / rTotal : null;
+    const urgent = joursAvantRupture !== null && joursAvantRupture <= DELAI_LIVRAISON_JOURS;
+
+    return { station: s, stock, stockDate: lastStockDate, rE, rG, fondRoulement, fondRoulementE, fondRoulementG, stockE, stockG, suggEssence, suggGasoil, suggTotal, totalVersements, joursAvantRupture, urgent };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.versements, monthPrefix]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Commandes</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Estimation de la quantité à commander par station, à partir du stock actuel, du fond de roulement et du rythme de vente récent. Hypothèse de délai de livraison : {DELAI_LIVRAISON_JOURS} jours.</p>
+      </div>
+
+      {db.stations.length === 0 ? (
+        <EmptyState icon={Truck} title="Aucune station" />
+      ) : (
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {rows.map((r) => {
+            const devise = r.station.devise || "GNF";
+            return (
+              <Card key={r.station.id} className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <p className="font-semibold">{r.station.nom}</p>
+                  {r.urgent && <Pill tone="danger">Urgent</Pill>}
+                </div>
+
+                {r.fondRoulement <= 0 ? (
+                  <p className="text-xs" style={{ color: C.textFaint }}>Fond de roulement non défini — à saisir dans l'onglet Stations pour activer l'estimation.</p>
+                ) : !r.stock ? (
+                  <p className="text-xs" style={{ color: C.textFaint }}>Aucun contrôle de stock enregistré.</p>
+                ) : (
+                  <>
+                    <div className="overflow-x-auto smi-scroll">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                            <th className="text-left py-1" style={{ color: C.textMuted }}></th>
+                            <th className="text-right py-1" style={{ color: C.textMuted }}>Essence</th>
+                            <th className="text-right py-1" style={{ color: C.textMuted }}>Gasoil</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                            <td className="py-1" style={{ color: C.textFaint }}>Stock actuel</td>
+                            <td className="py-1 text-right smi-mono">{fmtVol(r.stockE)}</td>
+                            <td className="py-1 text-right smi-mono">{fmtVol(r.stockG)}</td>
+                          </tr>
+                          <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                            <td className="py-1" style={{ color: C.textFaint }}>Seuil (fond de roulement)</td>
+                            <td className="py-1 text-right smi-mono">{fmtVol(r.fondRoulementE)}</td>
+                            <td className="py-1 text-right smi-mono">{fmtVol(r.fondRoulementG)}</td>
+                          </tr>
+                          <tr>
+                            <td className="py-1" style={{ color: C.textFaint }}>Rythme de vente (7j)</td>
+                            <td className="py-1 text-right smi-mono">{fmtVol(r.rE)}/j</td>
+                            <td className="py-1 text-right smi-mono">{fmtVol(r.rG)}/j</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="rounded-md p-3" style={{ background: r.urgent ? C.dangerSoft : C.amberSoft, border: `1px solid ${r.urgent ? C.danger : C.amberDim}` }}>
+                      <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: r.urgent ? C.danger : C.amber }}>Quantité suggérée à commander</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <p className="text-[10px]" style={{ color: C.textFaint }}>Essence</p>
+                          <GaugeNumber value={fmtVol(r.suggEssence)} tone="amber" />
+                        </div>
+                        <div>
+                          <p className="text-[10px]" style={{ color: C.textFaint }}>Gasoil</p>
+                          <GaugeNumber value={fmtVol(r.suggGasoil)} tone="teal" />
+                        </div>
+                      </div>
+                      <p className="text-xs mt-2 pt-2" style={{ color: r.urgent ? C.danger : C.amber, borderTop: `1px solid ${r.urgent ? C.danger : C.amberDim}` }}>
+                        Total : {fmtVol(r.suggTotal)} L {r.joursAvantRupture !== null && `— ${r.joursAvantRupture.toFixed(1)} j avant rupture estimée`}
+                      </p>
+                    </div>
+
+                    <div className="flex items-baseline justify-between text-xs pt-1" style={{ color: C.textFaint }}>
+                      <span>Versements du mois (capacité de financement)</span>
+                      <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(r.totalVersements, devise)}</span>
+                    </div>
+                  </>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------------------------- Rapport mensuel view --------------------------- */
 
 /* ---------------------------- Rapport hebdomadaire ------------------------------ */
@@ -4213,6 +4355,10 @@ const GUIDE_SECTIONS = [
     text: "Vue d'ensemble du réseau : volumes et chiffre d'affaires du mois en cours, station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture — avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
   },
   {
+    key: "commandes_reseau", title: "Commandes", adminOnly: true,
+    text: "Estimation de la quantité à commander par station, essence et gasoil séparément — calculée à partir du stock physique actuel, du fond de roulement (seuil défini dans Stations), et du rythme de vente moyen des 7 derniers jours. La quantité suggérée couvre ce qui manque pour revenir au seuil, plus une marge pour le délai de livraison estimé (3 jours). Les versements du mois sont affichés à titre indicatif, pour évaluer la capacité de financement de la commande.",
+  },
+  {
     key: "stations", title: "Stations", adminOnly: true,
     text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
   },
@@ -4355,6 +4501,7 @@ function AuditLogView({ db }) {
 const TABS = [
   { key: "guide", label: "Guide d'utilisation", icon: BookOpen, adminOnly: false },
   { key: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, adminOnly: true },
+  { key: "commandes_reseau", label: "Commandes", icon: Truck, adminOnly: true },
   { key: "stations", label: "Stations", icon: Building2, adminOnly: true },
   { key: "partenaires", label: "Partenaires", icon: Users, roles: ["admin", "gerant"] },
   { key: "pompes", label: "Pompes", icon: Gauge, adminOnly: true },
@@ -4412,6 +4559,7 @@ export default function App() {
     switch (tab) {
       case "guide": return <GuideView profile={profile} />;
       case "dashboard": return <DashboardView db={db} />;
+      case "commandes_reseau": return <CommandesReseauView db={db} />;
       case "stations": return <StationsView db={db} setDb={setDb} profile={profile} />;
       case "partenaires": return <PartenairesView db={db} setDb={setDb} profile={profile} />;
       case "pompes": return <PompesView db={db} setDb={setDb} profile={profile} />;
