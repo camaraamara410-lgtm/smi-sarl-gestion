@@ -3604,7 +3604,8 @@ function RapportHebdomadaireView({ db, profile }) {
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
 
-  const versementsSemaine = db.versements.filter((v) => (!stationId || v.stationId === stationId) && v.date >= start && v.date <= end);
+  const versementsSemaine = db.versements.filter((v) => (!stationId || v.stationId === stationId) && v.date >= start && v.date <= end)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.timestamp || "").localeCompare(b.timestamp || "")));
   const bonsSemaine = db.bons.filter((b) => (!stationId || b.stationId === stationId) && b.date >= start && b.date <= end)
     .sort((a, b) => (a.date < b.date ? -1 : 1));
   const receptionsSemaine = db.receptions.filter((r) => (!stationId || r.stationId === stationId) && r.date >= start && r.date <= end)
@@ -3753,6 +3754,34 @@ function RapportHebdomadaireView({ db, profile }) {
             </tfoot>
           </table>
         </div>
+
+        {versementsSemaine.length > 0 && (
+          <>
+            <p className="text-xs font-semibold italic mb-2" style={{ color: C.textMuted }}>Détail des versements (banque et n° de reçu)</p>
+            <div className="overflow-x-auto smi-scroll mb-4">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>Date</th>
+                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>Banque</th>
+                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>N° de reçu</th>
+                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Montant</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {versementsSemaine.map((v) => (
+                    <tr key={v.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1.5">{fmtDateLong(v.date)}</td>
+                      <td className="py-1.5">{v.banqueNom || (v.autreLibelle ? `Autre : ${v.autreLibelle}` : "—")}</td>
+                      <td className="py-1.5">{v.recuNumero || "—"}</td>
+                      <td className="py-1.5 text-right smi-mono">{fmtMontant(versementTotal(v), devise)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
 
         <p className="text-sm font-semibold mb-2 mt-3">3. Bons de la semaine</p>
         {bonsSemaine.length === 0 ? (
@@ -4552,7 +4581,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "rapport_hebdo", title: "Rapport hebdomadaire", adminOnly: false,
-    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG), bons de la semaine, livraisons reçues, stock d'ouverture (lundi), stock restant (dimanche), et commandes en cours (passées mais pas encore livrées, saisies dans l'onglet Commandes). Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
+    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG) avec le détail banque et n° de reçu de chaque versement, bons de la semaine, livraisons reçues, stock d'ouverture (lundi), stock restant (dimanche), et commandes en cours (passées mais pas encore livrées, saisies dans l'onglet Commandes). Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
