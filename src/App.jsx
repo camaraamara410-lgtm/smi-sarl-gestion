@@ -3721,66 +3721,46 @@ function RapportHebdomadaireView({ db, profile }) {
         </div>
 
         <p className="text-sm font-semibold mb-2 mt-3">2. Versements de la semaine</p>
-        <div className="overflow-x-auto smi-scroll mb-4">
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                <th className="text-left py-1.5" style={{ color: C.textMuted }}>Jour</th>
-                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Bancaire</th>
-                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Paiement marchand</th>
-                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Versement au compte du DG</th>
-                <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total du jour</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jours.map((j) => (
-                <tr key={j.date} style={{ borderBottom: `1px solid ${C.border}` }}>
-                  <td className="py-1.5">{j.nomJour} <span style={{ color: C.textFaint }}>({fmtDateLong(j.date)})</span></td>
-                  <td className="py-1.5 text-right smi-mono">{fmtMontant(j.bancaire, devise)}</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtMontant(j.marchand, devise)}</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtMontant(j.dg, devise)}</td>
-                  <td className="py-1.5 text-right smi-mono font-semibold">{fmtMontant(j.total, devise)}</td>
+        {versementsSemaine.length === 0 ? (
+          <p className="text-xs mb-4" style={{ color: C.textFaint }}>Aucun versement cette semaine.</p>
+        ) : (
+          <div className="overflow-x-auto smi-scroll mb-4">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Date</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Banque</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>N° de reçu</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Bancaire</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Paiement marchand</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Versement au compte du DG</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Total</th>
                 </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ borderTop: `2px solid ${C.border}` }}>
-                <td className="py-2 font-bold">Total semaine</td>
-                <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.bancaire, devise)}</td>
-                <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.marchand, devise)}</td>
-                <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.dg, devise)}</td>
-                <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(totalSemaine.total, devise)}</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-
-        {versementsSemaine.length > 0 && (
-          <>
-            <p className="text-xs font-semibold italic mb-2" style={{ color: C.textMuted }}>Détail des versements (banque et n° de reçu)</p>
-            <div className="overflow-x-auto smi-scroll mb-4">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>Date</th>
-                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>Banque</th>
-                    <th className="text-left py-1.5" style={{ color: C.textMuted }}>N° de reçu</th>
-                    <th className="text-right py-1.5" style={{ color: C.textMuted }}>Montant</th>
+              </thead>
+              <tbody>
+                {versementsSemaine.map((v) => (
+                  <tr key={v.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td className="py-1.5">{fmtDateLong(v.date)}</td>
+                    <td className="py-1.5">{v.banqueNom || (v.autreLibelle ? `Autre : ${v.autreLibelle}` : "—")}</td>
+                    <td className="py-1.5">{v.recuNumero || "—"}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(v.banqueMontant, devise)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(v.paiementMarchandMontant, devise)}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtMontant(v.autreMontant, devise)}</td>
+                    <td className="py-1.5 text-right smi-mono font-semibold">{fmtMontant(versementTotal(v), devise)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {versementsSemaine.map((v) => (
-                    <tr key={v.id} style={{ borderBottom: `1px solid ${C.border}` }}>
-                      <td className="py-1.5">{fmtDateLong(v.date)}</td>
-                      <td className="py-1.5">{v.banqueNom || (v.autreLibelle ? `Autre : ${v.autreLibelle}` : "—")}</td>
-                      <td className="py-1.5">{v.recuNumero || "—"}</td>
-                      <td className="py-1.5 text-right smi-mono">{fmtMontant(versementTotal(v), devise)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                  <td colSpan={3} className="py-2 font-bold">Total semaine</td>
+                  <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.bancaire, devise)}</td>
+                  <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.marchand, devise)}</td>
+                  <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalSemaine.dg, devise)}</td>
+                  <td className="py-2 text-right smi-mono font-bold" style={{ color: C.amber }}>{fmtMontant(totalSemaine.total, devise)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         )}
 
         <p className="text-sm font-semibold mb-2 mt-3">3. Bons de la semaine</p>
