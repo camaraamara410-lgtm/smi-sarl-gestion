@@ -1036,7 +1036,7 @@ function StationsView({ db, setDb, profile }) {
           {db.stations.map((s) => {
             const gerantsDeCetteStation = (db.gerants || []).filter((g) => g.stationId === s.id);
             return (
-              <Card key={s.id} className="flex flex-col gap-2" style={s.couleur ? { borderLeft: `4px solid ${s.couleur}` } : undefined}>
+              <Card key={s.id} className="flex flex-col gap-2" style={s.couleur ? { background: `color-mix(in srgb, ${s.couleur} 14%, ${C.panel})`, border: `1px solid color-mix(in srgb, ${s.couleur} 40%, ${C.border})`, borderLeft: `4px solid ${s.couleur}` } : undefined}>
                 <div className="flex items-start justify-between">
                   <div>
                     <p className="font-semibold flex items-center gap-1.5">{s.couleur && <span style={{ width: 9, height: 9, borderRadius: 999, background: s.couleur, flexShrink: 0 }} />}{s.nom}</p>
@@ -3213,7 +3213,7 @@ function DashboardView({ db }) {
             const statutColor = r.statutStock === "alerte" ? C.danger : r.statutStock === "attention" ? C.amber : r.statutStock === "ok" ? C.success : C.textFaint;
             const statutLabel = r.statutStock === "alerte" ? "Commander maintenant" : r.statutStock === "attention" ? "À surveiller" : r.statutStock === "ok" ? "Stock suffisant" : "Fond de roulement non défini";
             return (
-            <Card key={r.station.id} className="flex flex-col gap-3 smi-live" style={{ animationName: "none", ...(r.station.couleur ? { borderLeft: `4px solid ${r.station.couleur}` } : {}) }}>
+            <Card key={r.station.id} className="flex flex-col gap-3 smi-live" style={{ animationName: "none", ...(r.station.couleur ? { background: `color-mix(in srgb, ${r.station.couleur} 14%, ${C.panel})`, border: `1px solid color-mix(in srgb, ${r.station.couleur} 40%, ${C.border})`, borderLeft: `4px solid ${r.station.couleur}` } : {}) }}>
               <div className="flex items-center justify-between">
                 <p className="font-semibold flex items-center gap-1.5">{r.station.couleur && <span style={{ width: 9, height: 9, borderRadius: 999, background: r.station.couleur, flexShrink: 0 }} />}{r.station.nom}</p>
                 <Pill tone="amber">{devise}</Pill>
@@ -3414,7 +3414,7 @@ function CommandesReseauView({ db, setDb, profile }) {
           {rows.map((r) => {
             const devise = r.station.devise || "GNF";
             return (
-              <Card key={r.station.id} className="flex flex-col gap-3" style={r.station.couleur ? { borderLeft: `4px solid ${r.station.couleur}` } : undefined}>
+              <Card key={r.station.id} className="flex flex-col gap-3" style={r.station.couleur ? { background: `color-mix(in srgb, ${r.station.couleur} 14%, ${C.panel})`, border: `1px solid color-mix(in srgb, ${r.station.couleur} 40%, ${C.border})`, borderLeft: `4px solid ${r.station.couleur}` } : undefined}>
                 <div className="flex items-center justify-between">
                   <p className="font-semibold flex items-center gap-1.5">{r.station.couleur && <span style={{ width: 9, height: 9, borderRadius: 999, background: r.station.couleur, flexShrink: 0 }} />}{r.station.nom}</p>
                   {r.urgent && <Pill tone="danger">Urgent</Pill>}
