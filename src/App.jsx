@@ -87,6 +87,10 @@ const THEME_PRESETS = {
   clair: { bg: "#F7F5F1", bgAlt: "#FFFFFF", panel: "#FFFFFF", panelAlt: "#F0EDE6", border: "#DAD3C7", borderLight: "#C4BBA9", text: "#1E2420", textMuted: "#5B6B60", textFaint: "#8A968E" },
 };
 const ACCENT_PRESETS = { ambre: "#E8A33D", bleu: "#4C8FE8", vert: "#5FAE6E", corail: "#E86A5C", violet: "#A279E0" };
+// Palette dédiée aux stations — chaque station peut choisir sa couleur pour être repérée
+// d'un coup d'œil (cartes du Tableau de bord, Commandes, Stations...), indépendamment du
+// thème personnel de chaque utilisateur.
+const STATION_COLOR_PRESETS = ["#E8A33D", "#4C8FE8", "#5FAE6E", "#E86A5C", "#A279E0", "#3FA7A0", "#E8578C", "#C9A227"];
 const FONT_PRESETS = {
   inter: "'Inter', system-ui, sans-serif",
   systeme: "system-ui, -apple-system, sans-serif",
@@ -1006,6 +1010,14 @@ function StationsView({ db, setDb, profile }) {
             <Field label="Fond de roulement (L)" hint="Seuil minimum de stock total (essence + gasoil) à maintenir — sert à alerter avant une rupture.">
               <NumberInput value={form.fondRoulement ?? ""} onChange={(e) => setForm({ ...form, fondRoulement: e.target.value })} />
             </Field>
+            <Field label="Couleur de la station" hint="Pour la repérer facilement sur ses cartes dans l'application.">
+              <div className="flex gap-2 flex-wrap items-center">
+                {STATION_COLOR_PRESETS.map((hex) => (
+                  <button key={hex} type="button" onClick={() => setForm({ ...form, couleur: hex })} aria-label={hex} className="smi-btn rounded-full" style={{ width: 28, height: 28, background: hex, border: form.couleur === hex ? `3px solid ${C.text}` : `1px solid ${C.border}` }} />
+                ))}
+                {form.couleur && <button type="button" onClick={() => setForm({ ...form, couleur: null })} className="smi-btn text-xs" style={{ color: C.textFaint }}>Aucune</button>}
+              </div>
+            </Field>
             <Field label={form.pinHash ? "Changer le code PIN de la station" : "Code PIN de la station (optionnel, non utilisé pour les gérants)"} hint={form.pinHash ? "Un code est déjà défini ; laissez vide pour le conserver." : "Réservé à un usage futur — les gérants se connectent désormais avec un compte individuel (voir plus bas)."}>
               <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pinInput} onChange={(e) => setPinInput(e.target.value)} placeholder="••••" />
             </Field>
@@ -1024,10 +1036,10 @@ function StationsView({ db, setDb, profile }) {
           {db.stations.map((s) => {
             const gerantsDeCetteStation = (db.gerants || []).filter((g) => g.stationId === s.id);
             return (
-              <Card key={s.id} className="flex flex-col gap-2">
+              <Card key={s.id} className="flex flex-col gap-2" style={s.couleur ? { borderLeft: `4px solid ${s.couleur}` } : undefined}>
                 <div className="flex items-start justify-between">
                   <div>
-                    <p className="font-semibold">{s.nom}</p>
+                    <p className="font-semibold flex items-center gap-1.5">{s.couleur && <span style={{ width: 9, height: 9, borderRadius: 999, background: s.couleur, flexShrink: 0 }} />}{s.nom}</p>
                     <p className="text-xs flex items-center gap-1 mt-0.5" style={{ color: C.textMuted }}><MapPin size={12} /> {s.localisation || "—"}</p>
                   </div>
                   <Pill tone="amber">{s.devise || "GNF"}</Pill>
@@ -3201,9 +3213,9 @@ function DashboardView({ db }) {
             const statutColor = r.statutStock === "alerte" ? C.danger : r.statutStock === "attention" ? C.amber : r.statutStock === "ok" ? C.success : C.textFaint;
             const statutLabel = r.statutStock === "alerte" ? "Commander maintenant" : r.statutStock === "attention" ? "À surveiller" : r.statutStock === "ok" ? "Stock suffisant" : "Fond de roulement non défini";
             return (
-            <Card key={r.station.id} className="flex flex-col gap-3 smi-live" style={{ animationName: "none" }}>
+            <Card key={r.station.id} className="flex flex-col gap-3 smi-live" style={{ animationName: "none", ...(r.station.couleur ? { borderLeft: `4px solid ${r.station.couleur}` } : {}) }}>
               <div className="flex items-center justify-between">
-                <p className="font-semibold">{r.station.nom}</p>
+                <p className="font-semibold flex items-center gap-1.5">{r.station.couleur && <span style={{ width: 9, height: 9, borderRadius: 999, background: r.station.couleur, flexShrink: 0 }} />}{r.station.nom}</p>
                 <Pill tone="amber">{devise}</Pill>
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -3402,9 +3414,9 @@ function CommandesReseauView({ db, setDb, profile }) {
           {rows.map((r) => {
             const devise = r.station.devise || "GNF";
             return (
-              <Card key={r.station.id} className="flex flex-col gap-3">
+              <Card key={r.station.id} className="flex flex-col gap-3" style={r.station.couleur ? { borderLeft: `4px solid ${r.station.couleur}` } : undefined}>
                 <div className="flex items-center justify-between">
-                  <p className="font-semibold">{r.station.nom}</p>
+                  <p className="font-semibold flex items-center gap-1.5">{r.station.couleur && <span style={{ width: 9, height: 9, borderRadius: 999, background: r.station.couleur, flexShrink: 0 }} />}{r.station.nom}</p>
                   {r.urgent && <Pill tone="danger">Urgent</Pill>}
                 </div>
 
@@ -4552,7 +4564,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
-    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
+    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
   },
   {
     key: "partenaires", title: "Partenaires", adminOnly: false,
