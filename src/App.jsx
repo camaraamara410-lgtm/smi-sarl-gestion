@@ -427,8 +427,8 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], commandesReseau: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires", "commandesReseau"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -3270,8 +3270,52 @@ function DashboardView({ db }) {
 // tout est dérivé des saisies déjà existantes (Stock, Ventes, Versement, Stations).
 const DELAI_LIVRAISON_JOURS = 3; // hypothèse : temps estimé entre commande et livraison
 
-function CommandesReseauView({ db }) {
+function CommandesReseauView({ db, setDb, profile }) {
   const monthPrefix = todayISO().slice(0, 7);
+  const [openFormId, setOpenFormId] = useState(null);
+  const [cDate, setCDate] = useState(todayISO());
+  const [cProduit, setCProduit] = useState("essence");
+  const [cQuantite, setCQuantite] = useState("");
+  const [cJustification, setCJustification] = useState("");
+  const [cErr, setCErr] = useState("");
+
+  const openForm = (stationId, defaultQte) => {
+    setOpenFormId(stationId);
+    setCDate(todayISO());
+    setCProduit("essence");
+    setCQuantite(defaultQte ? String(Math.round(defaultQte)) : "");
+    setCJustification("");
+    setCErr("");
+  };
+
+  const saveCommande = (stationId, financableParProduit) => {
+    setCErr("");
+    if (!cQuantite || num(cQuantite) <= 0) { setCErr("Indiquez une quantité."); return; }
+    const financable = financableParProduit?.[cProduit];
+    const depasseFinancement = financable !== null && financable !== undefined && num(cQuantite) > financable;
+    if (depasseFinancement && !cJustification.trim()) {
+      setCErr("Cette quantité dépasse ce qui est finançable par les versements — indiquez une justification pour la direction.");
+      return;
+    }
+    const row = { id: uid(), stationId, date: cDate, produit: cProduit, quantite: cQuantite, justification: depasseFinancement ? cJustification.trim() : "", statut: "en_cours", timestamp: new Date().toISOString() };
+    let next = { ...db, commandesReseau: [...(db.commandesReseau || []), row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "commande_reseau", action: "création", after: { date: cDate, produit: cProduit, quantite: cQuantite, justification: row.justification || undefined } });
+    setDb(next);
+    setOpenFormId(null);
+  };
+
+  const marquerLivree = (c) => {
+    let next = { ...db, commandesReseau: db.commandesReseau.map((x) => (x.id === c.id ? { ...x, statut: "livree" } : x)) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: c.stationId, entity: "commande_reseau", action: "modification", after: { statut: "livree", produit: c.produit, quantite: c.quantite } });
+    setDb(next);
+  };
+
+  const supprimerCommande = (c) => {
+    if (!confirm("Supprimer cette commande en cours ?")) return;
+    let next = { ...db, commandesReseau: db.commandesReseau.filter((x) => x.id !== c.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: c.stationId, entity: "commande_reseau", action: "suppression", before: { date: c.date, produit: c.produit, quantite: c.quantite } });
+    setDb(next);
+  };
 
   const rows = useMemo(() => db.stations.map((s) => {
     const lastStockDate = [...db.stocks].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
@@ -3309,19 +3353,46 @@ function CommandesReseauView({ db }) {
     const suggGasoil = manqueG !== null ? manqueG + rG * DELAI_LIVRAISON_JOURS : null;
     const suggTotal = suggEssence !== null && suggGasoil !== null ? suggEssence + suggGasoil : null;
 
+    // Quantité finançable : la direction exige les reçus de versement avant d'accepter
+    // une commande — on calcule donc combien de litres les versements accumulés depuis la
+    // dernière commande livrée permettent réellement de financer, au prix unitaire le plus
+    // récemment saisi dans Ventes. La quantité recommandée ne peut jamais dépasser ça.
+    const derniereCommandeLivree = (db.commandesReseau || [])
+      .filter((c) => c.stationId === s.id && c.statut === "livree")
+      .sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    const versementsDepuisLivraison = db.versements
+      .filter((v) => v.stationId === s.id && (!derniereCommandeLivree || v.date > derniereCommandeLivree.date))
+      .reduce((a, v) => a + versementTotal(v), 0);
+
+    const derniereVente = [...db.ventes].filter((v) => v.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    const prixEssence = derniereVente ? num(derniereVente.prixEssence) : 0;
+    const prixGasoil = derniereVente ? num(derniereVente.prixGasoil) : 0;
+
+    const financableEssence = prixEssence > 0 ? (versementsDepuisLivraison * partE) / prixEssence : null;
+    const financableGasoil = prixGasoil > 0 ? (versementsDepuisLivraison * partG) / prixGasoil : null;
+
+    // Quantité finalement recommandée = la plus petite entre ce qui est souhaitable (pour
+    // revenir au fond de roulement) et ce qui est réellement finançable par les versements.
+    const recoEssence = suggEssence !== null && financableEssence !== null ? Math.min(suggEssence, financableEssence) : suggEssence;
+    const recoGasoil = suggGasoil !== null && financableGasoil !== null ? Math.min(suggGasoil, financableGasoil) : suggGasoil;
+    const financementInsuffisant = (financableEssence !== null && suggEssence !== null && financableEssence < suggEssence)
+      || (financableGasoil !== null && suggGasoil !== null && financableGasoil < suggGasoil);
+
     const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
     const stockTotalActuel = stockE !== null && stockG !== null ? stockE + stockG : null;
     const joursAvantRupture = stockTotalActuel !== null && rTotal > 0 ? stockTotalActuel / rTotal : null;
     const urgent = joursAvantRupture !== null && joursAvantRupture <= DELAI_LIVRAISON_JOURS;
 
-    return { station: s, stock, stockDate: lastStockDate, rE, rG, fondRoulement, fondRoulementE, fondRoulementG, stockE, stockG, suggEssence, suggGasoil, suggTotal, totalVersements, joursAvantRupture, urgent };
-  }), [db.stations, db.releves, db.ventes, db.stocks, db.versements, monthPrefix]);
+    const commandesEnCours = (db.commandesReseau || []).filter((c) => c.stationId === s.id && c.statut === "en_cours").sort((a, b) => (a.date < b.date ? 1 : -1));
+
+    return { station: s, stock, stockDate: lastStockDate, rE, rG, fondRoulement, fondRoulementE, fondRoulementG, stockE, stockG, suggEssence, suggGasoil, suggTotal, totalVersements, joursAvantRupture, urgent, commandesEnCours, versementsDepuisLivraison, prixEssence, prixGasoil, financableEssence, financableGasoil, recoEssence, recoGasoil, financementInsuffisant, derniereCommandeLivree };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.versements, db.commandesReseau, monthPrefix]);
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Commandes</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Estimation de la quantité à commander par station, à partir du stock actuel, du fond de roulement et du rythme de vente récent. Hypothèse de délai de livraison : {DELAI_LIVRAISON_JOURS} jours.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Estimation de la quantité à commander par station, à partir du stock actuel, du fond de roulement, du rythme de vente récent, et de la capacité de financement (versements depuis la dernière livraison). Hypothèse de délai de livraison : {DELAI_LIVRAISON_JOURS} jours.</p>
       </div>
 
       {db.stations.length === 0 ? (
@@ -3372,8 +3443,8 @@ function CommandesReseauView({ db }) {
                       </table>
                     </div>
 
-                    <div className="rounded-md p-3" style={{ background: r.urgent ? C.dangerSoft : C.amberSoft, border: `1px solid ${r.urgent ? C.danger : C.amberDim}` }}>
-                      <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: r.urgent ? C.danger : C.amber }}>Quantité suggérée à commander</p>
+                    <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                      <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: C.textMuted }}>Besoin idéal (pour revenir au fond de roulement)</p>
                       <div className="grid grid-cols-2 gap-2">
                         <div>
                           <p className="text-[10px]" style={{ color: C.textFaint }}>Essence</p>
@@ -3384,17 +3455,104 @@ function CommandesReseauView({ db }) {
                           <GaugeNumber value={fmtVol(r.suggGasoil)} tone="teal" />
                         </div>
                       </div>
-                      <p className="text-xs mt-2 pt-2" style={{ color: r.urgent ? C.danger : C.amber, borderTop: `1px solid ${r.urgent ? C.danger : C.amberDim}` }}>
+                      <p className="text-xs mt-2 pt-2" style={{ color: C.textFaint, borderTop: `1px solid ${C.border}` }}>
                         Total : {fmtVol(r.suggTotal)} L {r.joursAvantRupture !== null && `— ${r.joursAvantRupture.toFixed(1)} j avant rupture estimée`}
                       </p>
                     </div>
 
+                    <div className="rounded-md p-3" style={{ background: r.urgent ? C.dangerSoft : C.amberSoft, border: `1px solid ${r.urgent ? C.danger : C.amberDim}` }}>
+                      <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: r.urgent ? C.danger : C.amber }}>Quantité recommandée (finançable par les versements)</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <p className="text-[10px]" style={{ color: C.textFaint }}>Essence</p>
+                          <GaugeNumber value={fmtVol(r.recoEssence)} tone="amber" />
+                        </div>
+                        <div>
+                          <p className="text-[10px]" style={{ color: C.textFaint }}>Gasoil</p>
+                          <GaugeNumber value={fmtVol(r.recoGasoil)} tone="teal" />
+                        </div>
+                      </div>
+                      {r.prixEssence <= 0 || r.prixGasoil <= 0 ? (
+                        <p className="text-xs mt-2 pt-2" style={{ color: C.textFaint, borderTop: `1px solid ${C.border}` }}>Prix unitaire non trouvé dans Ventes — saisissez au moins une vente pour activer le calcul de financement.</p>
+                      ) : (
+                        <>
+                          <div className="flex items-baseline justify-between text-xs mt-2 pt-2" style={{ color: C.textFaint, borderTop: `1px solid ${r.urgent ? C.danger : C.amberDim}` }}>
+                            <span>Versements depuis dernière livraison{r.derniereCommandeLivree ? ` (${fmtDateLong(r.derniereCommandeLivree.date)})` : ""}</span>
+                            <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(r.versementsDepuisLivraison, devise)}</span>
+                          </div>
+                          {r.financementInsuffisant && (
+                            <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color: C.danger }}><AlertTriangle size={12} /> Financement insuffisant pour couvrir le besoin idéal — reçus de versement à présenter en conséquence, ou compléter avant de commander.</p>
+                          )}
+                        </>
+                      )}
+                    </div>
+
                     <div className="flex items-baseline justify-between text-xs pt-1" style={{ color: C.textFaint }}>
-                      <span>Versements du mois (capacité de financement)</span>
+                      <span>Versements du mois (info générale)</span>
                       <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(r.totalVersements, devise)}</span>
                     </div>
                   </>
                 )}
+
+                <div className="pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-xs uppercase font-semibold" style={{ color: C.textMuted }}>Commandes en cours</p>
+                    {openFormId !== r.station.id && (
+                      <button onClick={() => openForm(r.station.id, (r.recoEssence || 0) + (r.recoGasoil || 0))} className="smi-btn text-xs" style={{ color: C.teal }}><Plus size={13} /> Ajouter</button>
+                    )}
+                  </div>
+
+                  {r.commandesEnCours.length === 0 && openFormId !== r.station.id && (
+                    <p className="text-xs" style={{ color: C.textFaint }}>Aucune commande en cours.</p>
+                  )}
+
+                  {r.commandesEnCours.map((c) => (
+                    <div key={c.id} className="py-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span>{fmtDateLong(c.date)} · {c.produit === "essence" ? "Essence" : "Gasoil"} · <span className="smi-mono">{fmtVol(c.quantite)} L</span></span>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => marquerLivree(c)} className="smi-btn" style={{ color: C.success }} title="Marquer livrée"><CheckCircle2 size={14} /></button>
+                          <button onClick={() => supprimerCommande(c)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
+                        </div>
+                      </div>
+                      {c.justification && (
+                        <p className="text-xs mt-0.5 pl-0.5" style={{ color: C.amber }}>↳ Justification : {c.justification}</p>
+                      )}
+                    </div>
+                  ))}
+
+                  {openFormId === r.station.id && (
+                    <div className="rounded-md p-2.5 mt-2 flex flex-col gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Field label="Date"><TextInput type="date" value={cDate} onChange={(e) => setCDate(e.target.value)} max={todayISO()} /></Field>
+                        <Field label="Produit">
+                          <SelectInput value={cProduit} onChange={(e) => setCProduit(e.target.value)}>
+                            <option value="essence">Essence</option>
+                            <option value="gasoil">Gasoil</option>
+                          </SelectInput>
+                        </Field>
+                      </div>
+                      <Field label="Quantité commandée (L)"><NumberInput value={cQuantite} onChange={(e) => setCQuantite(e.target.value)} /></Field>
+                      {(() => {
+                        const financable = cProduit === "essence" ? r.financableEssence : r.financableGasoil;
+                        const depasse = financable !== null && financable !== undefined && num(cQuantite) > financable;
+                        return depasse ? (
+                          <>
+                            <p className="text-xs flex items-center gap-1.5" style={{ color: C.amber }}><AlertTriangle size={13} /> Dépasse le finançable ({fmtVol(financable)} L) — une justification est nécessaire pour la direction.</p>
+                            <Field label="Justification pour la direction">
+                              <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" rows={2} style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={cJustification} onChange={(e) => setCJustification(e.target.value)} placeholder="ex : Rupture imminente, client professionnel prioritaire à honorer..." />
+                            </Field>
+                          </>
+                        ) : null;
+                      })()}
+                      {cErr && <p className="text-xs flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={13} /> {cErr}</p>}
+                      <div className="flex gap-2 justify-end">
+                        <Button variant="ghost" onClick={() => setOpenFormId(null)}><X size={14} /> Annuler</Button>
+                        <Button onClick={() => saveCommande(r.station.id, { essence: r.financableEssence, gasoil: r.financableGasoil })}><CheckCircle2 size={14} /> Enregistrer</Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </Card>
             );
           })}
@@ -3486,12 +3644,18 @@ function RapportHebdomadaireView({ db, profile }) {
     return { ...computeStock(db.releves, db.stocks, stationId, record.date), date: record.date };
   }, [stationId, end, db.stocks, db.releves]);
 
+  // Commandes en cours (passées mais pas encore livrées) pour la station — information de
+  // contexte utile en fin de rapport, indépendamment de la semaine visée : ce qui est
+  // encore attendu compte pour la suite, quelle que soit la date à laquelle la commande a
+  // été passée.
+  const commandesEnCoursSemaine = (db.commandesReseau || []).filter((c) => c.stationId === stationId && c.statut === "en_cours").sort((a, b) => (a.date < b.date ? 1 : -1));
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
         <div>
           <h2 className="smi-display text-2xl">Rapport hebdomadaire</h2>
-          <p className="text-sm" style={{ color: C.textMuted }}>Ventes, versements, bons, livraisons, stock d'ouverture et stock restant sur la semaine (lundi à dimanche).</p>
+          <p className="text-sm" style={{ color: C.textMuted }}>Ventes, versements, bons, livraisons, stock d'ouverture, stock restant, et commandes en cours pour la station.</p>
         </div>
         <Button variant="ghost" onClick={exportPdf}><Printer size={16} /> Exporter en PDF</Button>
       </div>
@@ -3678,6 +3842,34 @@ function RapportHebdomadaireView({ db, profile }) {
               <p className="text-xs col-span-2" style={{ color: C.textFaint }}>Dernier contrôle disponible : {fmtDateLong(stockFinSemaine.date)} (pas de contrôle exactement le {fmtDateLong(end)}).</p>
             )}
             <p className="text-[10px] italic col-span-2" style={{ color: C.textFaint }}>Comptage physique constaté si renseigné, sinon stock théorique calculé.</p>
+          </div>
+        )}
+
+        <p className="text-sm font-semibold mb-2 mt-3">7. Commandes en cours (non livrées)</p>
+        {commandesEnCoursSemaine.length === 0 ? (
+          <p className="text-xs" style={{ color: C.textFaint }}>Aucune commande en cours pour cette station.</p>
+        ) : (
+          <div className="overflow-x-auto smi-scroll">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Date de commande</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Produit</th>
+                  <th className="text-right py-1.5" style={{ color: C.textMuted }}>Quantité (L)</th>
+                  <th className="text-left py-1.5" style={{ color: C.textMuted }}>Justification (si hors financement)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {commandesEnCoursSemaine.map((c) => (
+                  <tr key={c.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td className="py-1.5">{fmtDateLong(c.date)}</td>
+                    <td className="py-1.5">{c.produit === "essence" ? "Essence" : "Gasoil"}</td>
+                    <td className="py-1.5 text-right smi-mono">{fmtVol(c.quantite)}</td>
+                    <td className="py-1.5">{c.justification || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 
@@ -4348,7 +4540,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "rapport_hebdo", title: "Rapport hebdomadaire", adminOnly: false,
-    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG), bons de la semaine, livraisons reçues, stock d'ouverture (lundi) et stock restant (dimanche). Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
+    text: "Récapitulatif complet d'une semaine complète (lundi à dimanche) : ventes (essence/gasoil/CA) jour par jour, versements (Bancaire, Paiement marchand, Versement au compte du DG), bons de la semaine, livraisons reçues, stock d'ouverture (lundi), stock restant (dimanche), et commandes en cours (passées mais pas encore livrées, saisies dans l'onglet Commandes). Choisissez n'importe quelle date de la semaine visée — les bornes se calculent automatiquement. Exportable en PDF comme les autres rapports.",
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
@@ -4356,7 +4548,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "commandes_reseau", title: "Commandes", adminOnly: true,
-    text: "Estimation de la quantité à commander par station, essence et gasoil séparément — calculée à partir du stock physique actuel, du fond de roulement (seuil défini dans Stations), et du rythme de vente moyen des 7 derniers jours. La quantité suggérée couvre ce qui manque pour revenir au seuil, plus une marge pour le délai de livraison estimé (3 jours). Les versements du mois sont affichés à titre indicatif, pour évaluer la capacité de financement de la commande.",
+    text: "Estimation de la quantité à commander par station, essence et gasoil séparément. « Besoin idéal » = ce qui manque pour revenir au fond de roulement (seuil défini dans Stations), plus une marge pour le délai de livraison estimé (3 jours). « Quantité recommandée » = ce besoin idéal plafonné par ce qui est réellement finançable, puisque la direction exige les reçus de versement avant d'accepter une commande : le montant des versements accumulés depuis la dernière commande marquée « livrée » est divisé par le prix unitaire le plus récent saisi dans Ventes pour obtenir des litres finançables. Une alerte apparaît si le financement ne couvre pas le besoin idéal. Section « Commandes en cours » : enregistrez une commande passée (date, produit, quantité) — elle reste visible tant qu'elle n'est pas marquée « livrée », et apparaît aussi dans le Rapport hebdomadaire de la station.",
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
@@ -4444,7 +4636,7 @@ function GuideView({ profile }) {
 
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant", partenaire: "Client partenaire", commande_partenaire: "Commande partenaire", versement_partenaire: "Versement partenaire" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant", partenaire: "Client partenaire", commande_partenaire: "Commande partenaire", versement_partenaire: "Versement partenaire", commande_reseau: "Commande réseau" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
@@ -4559,7 +4751,7 @@ export default function App() {
     switch (tab) {
       case "guide": return <GuideView profile={profile} />;
       case "dashboard": return <DashboardView db={db} />;
-      case "commandes_reseau": return <CommandesReseauView db={db} />;
+      case "commandes_reseau": return <CommandesReseauView db={db} setDb={setDb} profile={profile} />;
       case "stations": return <StationsView db={db} setDb={setDb} profile={profile} />;
       case "partenaires": return <PartenairesView db={db} setDb={setDb} profile={profile} />;
       case "pompes": return <PompesView db={db} setDb={setDb} profile={profile} />;
