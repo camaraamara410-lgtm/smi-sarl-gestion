@@ -71,6 +71,10 @@ const FONTS = `
      une miniature de 40px à l'écran ne sert à rien sur papier. */
   .smi-print-photo { width: 220px !important; height: 220px !important; object-fit: contain !important; display: block !important; margin: 6px 0 !important; }
   .smi-print-photo-row { flex-direction: column !important; align-items: flex-start !important; }
+  /* Une zone imprimable en fenêtre modale (ex. fiche de passation) a souvent une hauteur
+     limitée avec défilement à l'écran — à l'impression, cette limite doit sauter pour que
+     tout le contenu sorte sur papier, pas seulement la portion visible à l'écran. */
+  .smi-print-area { max-height: none !important; overflow: visible !important; position: static !important; }
 }
 `;
 
@@ -3730,7 +3734,7 @@ function PassationsView({ db, setDb, profile }) {
         if (!p) return null;
         const st = db.stations.find((s) => s.id === p.stationId);
         return (
-          <div className="smi-no-print" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={() => setPrintingId(null)}>
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={() => setPrintingId(null)}>
             <div onClick={(e) => e.stopPropagation()} className="rounded-lg p-5 w-full max-w-lg smi-print-area" style={{ background: C.panel, border: `1px solid ${C.border}`, maxHeight: "85vh", overflowY: "auto" }}>
               <div className="flex items-center justify-between mb-4 smi-no-print">
                 <p className="smi-display text-xl">Fiche de passation</p>
