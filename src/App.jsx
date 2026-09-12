@@ -431,8 +431,8 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
 
 const DB_KEY = "smi_sarl_db_v1";
 const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], commandesReseau: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires", "commandesReseau"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], commandesReseau: [], passations: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires", "commandesReseau", "passations"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -3574,6 +3574,218 @@ function CommandesReseauView({ db, setDb, profile }) {
   );
 }
 
+/* ------------------------------- Passations ------------------------------ */
+
+// Document de passation entre gérants — trace qui a remplacé qui, quand, et dans quel état
+// (stock, caisse) la station a été transmise. Imprimable pour signature physique par les
+// deux parties si besoin.
+function PassationsView({ db, setDb, profile }) {
+  const [stationId, setStationId] = useState(db.stations[0]?.id || "");
+  const [date, setDate] = useState(todayISO());
+  const [gerantSortant, setGerantSortant] = useState("");
+  const [gerantEntrant, setGerantEntrant] = useState("");
+  const [stockEssence, setStockEssence] = useState("");
+  const [stockGasoil, setStockGasoil] = useState("");
+  const [caisseMontant, setCaisseMontant] = useState("");
+  const [observations, setObservations] = useState("");
+  const [err, setErr] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [printingId, setPrintingId] = useState(null);
+
+  const station = db.stations.find((s) => s.id === stationId);
+  const devise = station?.devise || "GNF";
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
+
+  const gerantsStation = (db.gerants || []).filter((g) => g.stationId === stationId);
+
+  // Pré-remplit stock et caisse avec les derniers chiffres connus de la station à la date
+  // choisie — l'admin n'a plus qu'à corriger si le comptage physique du jour diffère.
+  const preremplir = () => {
+    const lastStockDate = [...db.stocks].filter((x) => x.stationId === stationId && x.date <= date).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
+    if (lastStockDate) {
+      const st = computeStock(db.releves, db.stocks, stationId, lastStockDate);
+      setStockEssence(String(Math.round(stockAffichable(st, "essence"))));
+      setStockGasoil(String(Math.round(stockAffichable(st, "gasoil"))));
+    }
+    const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === stationId && x.date <= date).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
+    if (lastCaisseDate) {
+      const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, lastCaisseDate);
+      setCaisseMontant(String(Math.round(c.caisseAttendue)));
+    }
+  };
+
+  const reset = () => {
+    setDate(todayISO()); setGerantSortant(""); setGerantEntrant(""); setStockEssence(""); setStockGasoil(""); setCaisseMontant(""); setObservations(""); setEditingId(null);
+  };
+
+  const startEdit = (p) => {
+    setErr("");
+    setStationId(p.stationId); setDate(p.date); setGerantSortant(p.gerantSortant || ""); setGerantEntrant(p.gerantEntrant || "");
+    setStockEssence(p.stockEssence ?? ""); setStockGasoil(p.stockGasoil ?? ""); setCaisseMontant(p.caisseMontant ?? ""); setObservations(p.observations || "");
+    setEditingId(p.id);
+  };
+
+  const save = () => {
+    setErr("");
+    if (!stationId) { setErr("Choisissez une station."); return; }
+    if (!gerantEntrant.trim()) { setErr("Indiquez le nom du gérant entrant."); return; }
+    if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const existing = editingId ? db.passations.find((p) => p.id === editingId) : null;
+    const row = { id: editingId || uid(), stationId, date, gerantSortant: gerantSortant.trim(), gerantEntrant: gerantEntrant.trim(), stockEssence, stockGasoil, caisseMontant, observations: observations.trim(), timestamp: existing?.timestamp || new Date().toISOString() };
+    let next = { ...db, passations: editingId ? db.passations.map((p) => (p.id === editingId ? row : p)) : [...db.passations, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "passation", action: editingId ? "modification" : "création", after: { date, gerantSortant: row.gerantSortant, gerantEntrant: row.gerantEntrant } });
+    setDb(next);
+    reset();
+  };
+
+  const remove = (p) => {
+    if (!confirm(`Supprimer cette passation du ${fmtDateLong(p.date)} ?`)) return;
+    let next = { ...db, passations: db.passations.filter((x) => x.id !== p.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: p.stationId, entity: "passation", action: "suppression", before: { date: p.date, gerantEntrant: p.gerantEntrant } });
+    setDb(next);
+    if (editingId === p.id) reset();
+  };
+
+  const history = db.passations.slice().sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Passation</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Trace qui a remplacé qui, quand, et dans quel état (stock, caisse) chaque station a été transmise — imprimable pour signature.</p>
+      </div>
+
+      <Card className="max-w-md">
+        {editingId && (
+          <div className="rounded-md p-2.5 mb-3 flex items-center justify-between gap-2" style={{ background: C.tealSoft, border: `1px solid ${C.teal}55` }}>
+            <span className="text-xs" style={{ color: C.teal }}>Modification d'une passation existante</span>
+            <button onClick={reset} className="smi-btn text-xs" style={{ color: C.teal }}>Annuler</button>
+          </div>
+        )}
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} /></Field>
+          <Field label="Date de la passation"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          <Field label="Gérant sortant" hint={gerantsStation.length > 0 ? `Actuel(s) : ${gerantsStation.map((g) => g.nom).join(", ")}` : undefined}>
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={gerantSortant} onChange={(e) => setGerantSortant(e.target.value)} placeholder="ex : Amara Camara" />
+          </Field>
+          <Field label="Gérant entrant">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={gerantEntrant} onChange={(e) => setGerantEntrant(e.target.value)} placeholder="ex : Djamanaty Sylla" />
+          </Field>
+        </div>
+        <div className="flex justify-end mb-2">
+          <Button variant="ghost" onClick={preremplir} disabled={!stationId}>Pré-remplir stock/caisse</Button>
+        </div>
+        <div className="grid sm:grid-cols-3 gap-3 mb-3">
+          <Field label="Stock Essence (L)"><NumberInput value={stockEssence} onChange={(e) => setStockEssence(e.target.value)} /></Field>
+          <Field label="Stock Gasoil (L)"><NumberInput value={stockGasoil} onChange={(e) => setStockGasoil(e.target.value)} /></Field>
+          <Field label={`Caisse (${devise})`}><NumberInput value={caisseMontant} onChange={(e) => setCaisseMontant(e.target.value)} /></Field>
+        </div>
+        <Field label="Observations (état des équipements, remarques...)">
+          <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" rows={3} style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={observations} onChange={(e) => setObservations(e.target.value)} placeholder="ex : Pompe 2 en panne, réparation prévue le..." />
+        </Field>
+        {err && <p className="text-xs flex items-center gap-1.5 mt-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+        <div className="flex justify-end mt-3">
+          <Button onClick={save}><CheckCircle2 size={16} /> {editingId ? "Mettre à jour" : "Enregistrer la passation"}</Button>
+        </div>
+      </Card>
+
+      <Card>
+        <p className="font-semibold text-sm mb-3">Historique des passations</p>
+        {history.length === 0 ? (
+          <EmptyState icon={Users} title="Aucune passation enregistrée" />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {history.map((p) => {
+              const st = db.stations.find((s) => s.id === p.stationId);
+              return (
+                <div key={p.id} className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="text-xs">
+                      <p className="font-medium" style={{ color: C.text }}>{fmtDateLong(p.date)} — {st?.nom || "—"}</p>
+                      <p style={{ color: C.textMuted }}>{p.gerantSortant || "—"} → {p.gerantEntrant}</p>
+                    </div>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <button onClick={() => setPrintingId(p.id)} className="smi-btn" style={{ color: C.teal }} title="Imprimer"><Printer size={14} /></button>
+                      <button onClick={() => startEdit(p)} className="smi-btn" style={{ color: C.teal }}><Pencil size={14} /></button>
+                      <button onClick={() => remove(p)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={14} /></button>
+                    </div>
+                  </div>
+                  {(p.stockEssence || p.stockGasoil || p.caisseMontant) && (
+                    <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>
+                      Stock : E {fmtVol(p.stockEssence || 0)} / G {fmtVol(p.stockGasoil || 0)} · Caisse : {fmtMontant(p.caisseMontant || 0, st?.devise || "GNF")}
+                    </p>
+                  )}
+                  {p.observations && <p className="text-xs mt-1 italic" style={{ color: C.textFaint }}>{p.observations}</p>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      {printingId && (() => {
+        const p = db.passations.find((x) => x.id === printingId);
+        if (!p) return null;
+        const st = db.stations.find((s) => s.id === p.stationId);
+        return (
+          <div className="smi-no-print" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={() => setPrintingId(null)}>
+            <div onClick={(e) => e.stopPropagation()} className="rounded-lg p-5 w-full max-w-lg smi-print-area" style={{ background: C.panel, border: `1px solid ${C.border}`, maxHeight: "85vh", overflowY: "auto" }}>
+              <div className="flex items-center justify-between mb-4 smi-no-print">
+                <p className="smi-display text-xl">Fiche de passation</p>
+                <div className="flex gap-2">
+                  <Button variant="ghost" onClick={() => window.print()}><Printer size={16} /> Imprimer</Button>
+                  <button onClick={() => setPrintingId(null)} className="smi-btn" style={{ color: C.textMuted }}><X size={20} /></button>
+                </div>
+              </div>
+              <div className="hidden smi-print-only mb-4">
+                <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Fiche de passation</h1>
+              </div>
+              <div className="flex flex-col gap-2 text-sm">
+                <p><span style={{ color: C.textFaint }}>Station :</span> <span className="font-semibold">{st?.nom}</span></p>
+                <p><span style={{ color: C.textFaint }}>Date :</span> {fmtDateLong(p.date)}</p>
+                <p><span style={{ color: C.textFaint }}>Gérant sortant :</span> {p.gerantSortant || "—"}</p>
+                <p><span style={{ color: C.textFaint }}>Gérant entrant :</span> {p.gerantEntrant}</p>
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  <div className="rounded-md p-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>Stock Essence</p>
+                    <p className="font-semibold smi-mono">{fmtVol(p.stockEssence || 0)} L</p>
+                  </div>
+                  <div className="rounded-md p-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>Stock Gasoil</p>
+                    <p className="font-semibold smi-mono">{fmtVol(p.stockGasoil || 0)} L</p>
+                  </div>
+                  <div className="rounded-md p-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                    <p className="text-xs" style={{ color: C.textFaint }}>Caisse</p>
+                    <p className="font-semibold smi-mono">{fmtMontant(p.caisseMontant || 0, st?.devise || "GNF")}</p>
+                  </div>
+                </div>
+                {p.observations && (
+                  <div className="mt-2">
+                    <p className="text-xs" style={{ color: C.textFaint }}>Observations</p>
+                    <p>{p.observations}</p>
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-6 mt-8">
+                  <div>
+                    <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Gérant sortant</p>
+                    <div style={{ borderTop: `1px solid ${C.border}` }} />
+                  </div>
+                  <div>
+                    <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Gérant entrant</p>
+                    <div style={{ borderTop: `1px solid ${C.border}` }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
 /* ---------------------------- Rapport mensuel view --------------------------- */
 
 /* ---------------------------- Rapport hebdomadaire ------------------------------ */
@@ -4576,6 +4788,10 @@ const GUIDE_SECTIONS = [
     text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
   },
   {
+    key: "passations", title: "Passation", adminOnly: true,
+    text: "Enregistre chaque changement de gérant dans une station : qui remplace qui, à quelle date, et dans quel état (stock essence/gasoil, caisse) la station a été transmise, avec un bouton « Pré-remplir stock/caisse » qui reprend les derniers chiffres connus. Chaque passation peut être imprimée sous forme de fiche avec lignes de signature pour le gérant sortant et le gérant entrant.",
+  },
+  {
     key: "partenaires", title: "Partenaires", adminOnly: false,
     text: "Suivi des clients/stations partenaires qui ne sont pas sous le contrôle quotidien strict du réseau (pas de relevé, stock ou caisse) — seulement leurs commandes et versements. L'admin gère la liste des clients ; un gérant peut être assigné à un client précis (depuis Stations) et n'accède alors qu'à ce client. Chaque commande indique la quantité commandée, livrée, et le prix ; le tableau de bord du client affiche volume commandé, volume livré, valeur commandée et montant versé, avec le reste à livrer et le reste à payer calculés automatiquement.",
   },
@@ -4657,7 +4873,7 @@ function GuideView({ profile }) {
 
 /* ------------------------------ Journal des saisies ---------------------------- */
 
-const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant", partenaire: "Client partenaire", commande_partenaire: "Commande partenaire", versement_partenaire: "Versement partenaire", commande_reseau: "Commande réseau" };
+const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant", partenaire: "Client partenaire", commande_partenaire: "Commande partenaire", versement_partenaire: "Versement partenaire", commande_reseau: "Commande réseau", passation: "Passation" };
 
 function AuditLogView({ db }) {
   const entries = db.audit || [];
@@ -4716,6 +4932,7 @@ const TABS = [
   { key: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, adminOnly: true },
   { key: "commandes_reseau", label: "Commandes", icon: Truck, adminOnly: true },
   { key: "stations", label: "Stations", icon: Building2, adminOnly: true },
+  { key: "passations", label: "Passation", icon: Users, adminOnly: true },
   { key: "partenaires", label: "Partenaires", icon: Users, roles: ["admin", "gerant"] },
   { key: "pompes", label: "Pompes", icon: Gauge, adminOnly: true },
   { key: "releve", label: "Relevé Pompes", icon: Fuel, adminOnly: false },
@@ -4774,6 +4991,7 @@ export default function App() {
       case "dashboard": return <DashboardView db={db} />;
       case "commandes_reseau": return <CommandesReseauView db={db} setDb={setDb} profile={profile} />;
       case "stations": return <StationsView db={db} setDb={setDb} profile={profile} />;
+      case "passations": return <PassationsView db={db} setDb={setDb} profile={profile} />;
       case "partenaires": return <PartenairesView db={db} setDb={setDb} profile={profile} />;
       case "pompes": return <PompesView db={db} setDb={setDb} profile={profile} />;
       case "releve": return <RelevePompesView db={db} setDb={setDb} profile={profile} />;
