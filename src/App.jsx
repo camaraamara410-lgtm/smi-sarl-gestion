@@ -72,9 +72,10 @@ const FONTS = `
   .smi-print-photo { width: 220px !important; height: 220px !important; object-fit: contain !important; display: block !important; margin: 6px 0 !important; }
   .smi-print-photo-row { flex-direction: column !important; align-items: flex-start !important; }
   /* Une zone imprimable en fenêtre modale (ex. fiche de passation) a souvent une hauteur
-     limitée avec défilement à l'écran — à l'impression, cette limite doit sauter pour que
-     tout le contenu sorte sur papier, pas seulement la portion visible à l'écran. */
-  .smi-print-area { max-height: none !important; overflow: visible !important; position: static !important; }
+     limitée avec défilement à l'écran, et une largeur volontairement réduite (max-w-lg)
+     pour rester lisible dans une fenêtre — à l'impression, ces deux limites doivent
+     sauter pour que le document occupe toute la page, pas juste une carte centrée. */
+  .smi-print-area { max-height: none !important; overflow: visible !important; position: static !important; max-width: none !important; width: 100% !important; margin: 0 !important; padding: 24px !important; }
 }
 `;
 
@@ -2554,8 +2555,9 @@ function VersementView({ db, setDb, profile }) {
 // route suivent la même catégorie que le bon auquel ils sont rattachés.
 function bonCategorie(b) {
   const l = (b.libelle || "").toLowerCase();
+  if (l.includes("citerne")) return "citerne";
   if (l.includes("groupe") || l.includes("transport") || l.includes("vidange")) return "groupe_transport_vidange";
-  return "citerne";
+  return "autre";
 }
 
 function BonsView({ db, setDb, profile }) {
@@ -2657,6 +2659,7 @@ function BonsView({ db, setDb, profile }) {
   const cumulTotal = history.reduce((a, b) => a + bonTotal(b), 0);
   const cumulCiterne = history.filter((b) => bonCategorie(b) === "citerne").reduce((a, b) => a + bonTotal(b), 0);
   const cumulGroupeTransport = history.filter((b) => bonCategorie(b) === "groupe_transport_vidange").reduce((a, b) => a + bonTotal(b), 0);
+  const cumulAutreBon = history.filter((b) => bonCategorie(b) === "autre").reduce((a, b) => a + bonTotal(b), 0);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2683,7 +2686,7 @@ function BonsView({ db, setDb, profile }) {
         </div>
 
         <div className="flex flex-col gap-3">
-          <Field label="Libellé" hint="Utilisez « Citerne » ou « Groupe / Transport / Vidange » dans le libellé pour un classement automatique correct dans les cumuls.">
+          <Field label="Libellé" hint="Utilisez « Citerne » ou « Groupe / Transport / Vidange » dans le libellé pour un classement automatique correct dans les cumuls — sinon, classé en « Autre bon ».">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="ex : Citerne BI 7077" />
           </Field>
           <div className="grid sm:grid-cols-3 gap-3">
@@ -2724,7 +2727,7 @@ function BonsView({ db, setDb, profile }) {
         </div>
         <p className="font-semibold text-sm mb-3">Historique des bons</p>
         {grouped.length > 0 && (
-          <div className="grid grid-cols-3 gap-3 mb-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
             <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
               <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
               <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" />
@@ -2736,6 +2739,10 @@ function BonsView({ db, setDb, profile }) {
             <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
               <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Groupe/Transport/Vidange</p>
               <GaugeNumber value={fmtMontant(cumulGroupeTransport, devise)} />
+            </div>
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Autre bon</p>
+              <GaugeNumber value={fmtMontant(cumulAutreBon, devise)} />
             </div>
           </div>
         )}
@@ -2770,7 +2777,7 @@ function BonsView({ db, setDb, profile }) {
                           )}
                           <div className="flex-1 min-w-0 text-xs" style={{ color: C.textMuted }}>
                             <span className="font-medium" style={{ color: C.text }}>{b.libelle}</span>{" "}
-                            <Pill tone={bonCategorie(b) === "groupe_transport_vidange" ? "teal" : "amber"}>{bonCategorie(b) === "groupe_transport_vidange" ? "Groupe/Transport/Vidange" : "Citerne"}</Pill>
+                            <Pill tone={bonCategorie(b) === "groupe_transport_vidange" ? "teal" : bonCategorie(b) === "autre" ? "muted" : "amber"}>{bonCategorie(b) === "groupe_transport_vidange" ? "Groupe/Transport/Vidange" : bonCategorie(b) === "autre" ? "Autre bon" : "Citerne"}</Pill>
                             {num(b.quantite) > 0 && <span> · {fmtVol(b.quantite)} × {fmtMontant(b.prixUnitaire, dv)}</span>}
                             {num(b.fraisRoute) > 0 && <span> · Frais : {fmtMontant(b.fraisRoute, dv)}</span>}
                           </div>
@@ -3746,7 +3753,7 @@ function PassationsView({ db, setDb, profile }) {
               <div className="hidden smi-print-only mb-4">
                 <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Fiche de passation</h1>
               </div>
-              <div className="flex flex-col gap-2 text-sm">
+              <div className="flex flex-col gap-3 text-base">
                 <p><span style={{ color: C.textFaint }}>Station :</span> <span className="font-semibold">{st?.nom}</span></p>
                 <p><span style={{ color: C.textFaint }}>Date :</span> {fmtDateLong(p.date)}</p>
                 <p><span style={{ color: C.textFaint }}>Gérant sortant :</span> {p.gerantSortant || "—"}</p>
@@ -3771,13 +3778,17 @@ function PassationsView({ db, setDb, profile }) {
                     <p>{p.observations}</p>
                   </div>
                 )}
-                <div className="grid grid-cols-2 gap-6 mt-8">
+                <div className="grid grid-cols-3 gap-6 mt-8">
                   <div>
                     <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Gérant sortant</p>
                     <div style={{ borderTop: `1px solid ${C.border}` }} />
                   </div>
                   <div>
                     <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Gérant entrant</p>
+                    <div style={{ borderTop: `1px solid ${C.border}` }} />
+                  </div>
+                  <div>
+                    <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Chef Réseau</p>
                     <div style={{ borderTop: `1px solid ${C.border}` }} />
                   </div>
                 </div>
@@ -3852,6 +3863,9 @@ function RapportHebdomadaireView({ db, profile }) {
   }), { bancaire: 0, marchand: 0, dg: 0, total: 0, venteEssence: 0, venteGasoil: 0, ca: 0 });
 
   const totalBons = bonsSemaine.reduce((a, b) => a + bonTotal(b), 0);
+  const totalBonsCiterne = bonsSemaine.filter((b) => bonCategorie(b) === "citerne").reduce((a, b) => a + bonTotal(b), 0);
+  const totalBonsGroupeTransport = bonsSemaine.filter((b) => bonCategorie(b) === "groupe_transport_vidange").reduce((a, b) => a + bonTotal(b), 0);
+  const totalBonsAutre = bonsSemaine.filter((b) => bonCategorie(b) === "autre").reduce((a, b) => a + bonTotal(b), 0);
 
   // Stock d'ouverture de la semaine : premier contrôle de stock enregistré à partir du
   // lundi (à défaut, le plus récent avant cette date — donc la clôture du vendredi
@@ -4005,6 +4019,18 @@ function RapportHebdomadaireView({ db, profile }) {
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: `2px solid ${C.border}` }}>
+                  <td colSpan={3} className="py-1.5">Dont Citerne</td>
+                  <td className="py-1.5 text-right smi-mono">{fmtMontant(totalBonsCiterne, devise)}</td>
+                </tr>
+                <tr>
+                  <td colSpan={3} className="py-1.5">Dont Groupe/Transport/Vidange</td>
+                  <td className="py-1.5 text-right smi-mono">{fmtMontant(totalBonsGroupeTransport, devise)}</td>
+                </tr>
+                <tr>
+                  <td colSpan={3} className="py-1.5">Dont Autre bon</td>
+                  <td className="py-1.5 text-right smi-mono">{fmtMontant(totalBonsAutre, devise)}</td>
+                </tr>
+                <tr style={{ borderTop: `1px solid ${C.border}` }}>
                   <td colSpan={3} className="py-2 font-bold">Total Bons semaine</td>
                   <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalBons, devise)}</td>
                 </tr>
