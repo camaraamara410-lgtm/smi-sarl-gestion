@@ -2555,7 +2555,7 @@ function VersementView({ db, setDb, profile }) {
 // route suivent la même catégorie que le bon auquel ils sont rattachés.
 function bonCategorie(b) {
   const l = (b.libelle || "").toLowerCase();
-  if (l.includes("citerne")) return "citerne";
+  if (l.includes("citerne") || l.includes("consommation") || l.includes("pick-up") || l.includes("pick up") || l.includes("pickup")) return "citerne";
   if (l.includes("groupe") || l.includes("transport") || l.includes("vidange")) return "groupe_transport_vidange";
   return "autre";
 }
@@ -2686,7 +2686,7 @@ function BonsView({ db, setDb, profile }) {
         </div>
 
         <div className="flex flex-col gap-3">
-          <Field label="Libellé" hint="Utilisez « Citerne » ou « Groupe / Transport / Vidange » dans le libellé pour un classement automatique correct dans les cumuls — sinon, classé en « Autre bon ».">
+          <Field label="Libellé" hint="Utilisez « Citerne », « Consommation » ou « Pick-up » pour la catégorie Citerne, ou « Groupe / Transport / Vidange » pour l'autre catégorie — sinon, classé en « Autre bon ».">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="ex : Citerne BI 7077" />
           </Field>
           <div className="grid sm:grid-cols-3 gap-3">
