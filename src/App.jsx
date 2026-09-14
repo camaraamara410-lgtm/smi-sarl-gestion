@@ -3609,6 +3609,21 @@ function PassationsView({ db, setDb, profile }) {
 
   const gerantsStation = (db.gerants || []).filter((g) => g.stationId === stationId);
 
+  // Index de clôture de chaque pompe de la station, au dernier relevé connu à la date de
+  // passation ou avant — ce que le gérant sortant laisse comme dernier compteur relevé.
+  const indexPompes = useMemo(() => {
+    return db.pompes.filter((p) => p.stationId === stationId).map((p) => {
+      const releve = db.releves.filter((r) => r.pompeId === p.id && r.date <= date).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+      return {
+        pompeId: p.id, pompeNom: p.nom,
+        showEssence: pompeHas(p, "essence"), showGasoil: pompeHas(p, "gasoil"),
+        indexClotureEssence: releve?.indexClotureEssence ?? null,
+        indexClotureGasoil: releve?.indexClotureGasoil ?? null,
+        date: releve?.date || null,
+      };
+    });
+  }, [db.pompes, db.releves, stationId, date]);
+
   // Pré-remplit stock et caisse avec les derniers chiffres connus de la station à la date
   // choisie — l'admin n'a plus qu'à corriger si le comptage physique du jour diffère.
   const preremplir = () => {
@@ -3642,7 +3657,7 @@ function PassationsView({ db, setDb, profile }) {
     if (!gerantEntrant.trim()) { setErr("Indiquez le nom du gérant entrant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.passations.find((p) => p.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId, date, gerantSortant: gerantSortant.trim(), gerantEntrant: gerantEntrant.trim(), stockEssence, stockGasoil, caisseMontant, observations: observations.trim(), timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId, date, gerantSortant: gerantSortant.trim(), gerantEntrant: gerantEntrant.trim(), stockEssence, stockGasoil, caisseMontant, observations: observations.trim(), indexPompes, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, passations: editingId ? db.passations.map((p) => (p.id === editingId ? row : p)) : [...db.passations, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "passation", action: editingId ? "modification" : "création", after: { date, gerantSortant: row.gerantSortant, gerantEntrant: row.gerantEntrant } });
     setDb(next);
@@ -3688,11 +3703,42 @@ function PassationsView({ db, setDb, profile }) {
         <div className="flex justify-end mb-2">
           <Button variant="ghost" onClick={preremplir} disabled={!stationId}>Pré-remplir stock/caisse</Button>
         </div>
+        <p className="text-[10px] italic mb-2" style={{ color: C.textFaint }}>L'index de clôture par pompe se remplit automatiquement ci-dessous, sans bouton à cliquer.</p>
         <div className="grid sm:grid-cols-3 gap-3 mb-3">
           <Field label="Stock Essence (L)"><NumberInput value={stockEssence} onChange={(e) => setStockEssence(e.target.value)} /></Field>
           <Field label="Stock Gasoil (L)"><NumberInput value={stockGasoil} onChange={(e) => setStockGasoil(e.target.value)} /></Field>
           <Field label={`Caisse (${devise})`}><NumberInput value={caisseMontant} onChange={(e) => setCaisseMontant(e.target.value)} /></Field>
         </div>
+
+        {indexPompes.length > 0 && (
+          <div className="mb-3">
+            <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: C.textMuted }}>Index de clôture par pompe (gérant sortant)</p>
+            <div className="overflow-x-auto smi-scroll">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <th className="text-left py-1" style={{ color: C.textMuted }}>Pompe</th>
+                    <th className="text-right py-1" style={{ color: C.textMuted }}>Index Essence</th>
+                    <th className="text-right py-1" style={{ color: C.textMuted }}>Index Gasoil</th>
+                    <th className="text-left py-1" style={{ color: C.textMuted }}>Relevé du</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {indexPompes.map((ip) => (
+                    <tr key={ip.pompeId} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td className="py-1">{ip.pompeNom}</td>
+                      <td className="py-1 text-right smi-mono">{ip.showEssence ? (ip.indexClotureEssence !== null ? ip.indexClotureEssence : "—") : "—"}</td>
+                      <td className="py-1 text-right smi-mono">{ip.showGasoil ? (ip.indexClotureGasoil !== null ? ip.indexClotureGasoil : "—") : "—"}</td>
+                      <td className="py-1" style={{ color: C.textFaint }}>{ip.date ? fmtDateLong(ip.date) : "Aucun relevé"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] italic mt-1" style={{ color: C.textFaint }}>Repris automatiquement du dernier Relevé Pompes à la date de passation ou avant — enregistré avec la fiche.</p>
+          </div>
+        )}
+
         <Field label="Observations (état des équipements, remarques...)">
           <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" rows={3} style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={observations} onChange={(e) => setObservations(e.target.value)} placeholder="ex : Pompe 2 en panne, réparation prévue le..." />
         </Field>
@@ -3772,6 +3818,31 @@ function PassationsView({ db, setDb, profile }) {
                     <p className="font-semibold smi-mono">{fmtMontant(p.caisseMontant || 0, st?.devise || "GNF")}</p>
                   </div>
                 </div>
+                {p.indexPompes && p.indexPompes.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-xs mb-1" style={{ color: C.textFaint }}>Index de clôture par pompe (gérant sortant)</p>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                          <th className="text-left py-1" style={{ color: C.textMuted }}>Pompe</th>
+                          <th className="text-right py-1" style={{ color: C.textMuted }}>Index Essence</th>
+                          <th className="text-right py-1" style={{ color: C.textMuted }}>Index Gasoil</th>
+                          <th className="text-left py-1" style={{ color: C.textMuted }}>Relevé du</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {p.indexPompes.map((ip) => (
+                          <tr key={ip.pompeId} style={{ borderBottom: `1px solid ${C.border}` }}>
+                            <td className="py-1">{ip.pompeNom}</td>
+                            <td className="py-1 text-right smi-mono">{ip.showEssence ? (ip.indexClotureEssence !== null ? ip.indexClotureEssence : "—") : "—"}</td>
+                            <td className="py-1 text-right smi-mono">{ip.showGasoil ? (ip.indexClotureGasoil !== null ? ip.indexClotureGasoil : "—") : "—"}</td>
+                            <td className="py-1" style={{ color: C.textFaint }}>{ip.date ? fmtDateLong(ip.date) : "Aucun relevé"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
                 {p.observations && (
                   <div className="mt-2">
                     <p className="text-xs" style={{ color: C.textFaint }}>Observations</p>
@@ -4819,7 +4890,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "passations", title: "Passation", adminOnly: true,
-    text: "Enregistre chaque changement de gérant dans une station : qui remplace qui, à quelle date, et dans quel état (stock essence/gasoil, caisse) la station a été transmise, avec un bouton « Pré-remplir stock/caisse » qui reprend les derniers chiffres connus. Chaque passation peut être imprimée sous forme de fiche avec lignes de signature pour le gérant sortant et le gérant entrant.",
+    text: "Enregistre chaque changement de gérant dans une station : qui remplace qui, à quelle date, et dans quel état (stock essence/gasoil, caisse, et index de clôture de chaque pompe — repris automatiquement du dernier Relevé Pompes) la station a été transmise. Un bouton « Pré-remplir stock/caisse » reprend les derniers chiffres connus. Chaque passation peut être imprimée en pleine page avec lignes de signature pour le gérant sortant, le gérant entrant, et le Chef Réseau.",
   },
   {
     key: "partenaires", title: "Partenaires", adminOnly: false,
