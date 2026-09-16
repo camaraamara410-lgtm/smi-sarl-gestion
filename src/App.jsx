@@ -2301,8 +2301,32 @@ function VersementView({ db, setDb, profile }) {
   const [expandedDate, setExpandedDate] = useState(null);
   const [lightbox, setLightbox] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [creeParManuel, setCreeParManuel] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
+  const isAdmin = profile.role === "admin";
+  const gerantsStationCourante = (db.gerants || []).filter((g) => g.stationId === (isGerant ? profile.stationId : stationId));
+
+  // Attribution automatique de l'auteur des anciennes saisies (sans « Saisi par » déjà
+  // renseigné) — priorité au Journal des saisies (précis, à l'action près), puis repli sur
+  // la période de passation si l'action est trop ancienne pour y figurer encore. Ne touche
+  // jamais une saisie déjà attribuée, manuellement ou automatiquement.
+  const attribuerAutomatiquement = () => {
+    let countAudit = 0, countPassation = 0;
+    const versementsMaj = db.versements.map((v) => {
+      if (v.creePar || (stationId && v.stationId !== stationId)) return v;
+      const parAudit = gerantParAudit(db.audit, "versement", v.stationId, v.timestamp);
+      if (parAudit) { countAudit++; return { ...v, creePar: parAudit }; }
+      const parPassation = gerantParPassation(db.passations, v.stationId, v.date);
+      if (parPassation) { countPassation++; return { ...v, creePar: parPassation }; }
+      return v;
+    });
+    if (countAudit + countPassation === 0) { alert("Aucune saisie sans auteur n'a pu être rattachée (ni via le Journal des saisies, ni via les passations)."); return; }
+    let next = { ...db, versements: versementsMaj };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: stationId || null, entity: "versement", action: "modification", after: { note: `Attribution automatique (${countAudit} via journal, ${countPassation} via passations)` } });
+    setDb(next);
+    alert(`${countAudit + countPassation} versement(s) attribué(s) — ${countAudit} via le Journal des saisies (précis), ${countPassation} via les passations (période estimée).`);
+  };
 
   const total = num(banqueMontant) + num(paiementMarchandMontant) + num(autreMontant);
 
@@ -2319,7 +2343,7 @@ function VersementView({ db, setDb, profile }) {
 
   const reset = () => {
     setBanqueNom(""); setBanqueMontant(""); setBanquePhoto(null); setRecuNumero("");
-    setPaiementMarchandMontant(""); setAutreMontant(""); setAutreLibelle(""); setEditingId(null);
+    setPaiementMarchandMontant(""); setAutreMontant(""); setAutreLibelle(""); setEditingId(null); setCreeParManuel("");
   };
 
   // Charge un versement existant dans le formulaire pour le corriger — plus besoin de
@@ -2335,6 +2359,7 @@ function VersementView({ db, setDb, profile }) {
     setPaiementMarchandMontant(v.paiementMarchandMontant ?? "");
     setAutreMontant(v.autreMontant ?? "");
     setAutreLibelle(v.autreLibelle || "");
+    setCreeParManuel(v.creePar || "");
     setEditingId(v.id);
   };
 
@@ -2345,7 +2370,11 @@ function VersementView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez au moins un montant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.versements.find((x) => x.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, creePar: existing?.creePar || profile?.name || "", timestamp: existing?.timestamp || new Date().toISOString() };
+    // L'admin peut corriger manuellement qui a fait la saisie (utile pour l'historique
+    // enregistré avant la mise en place des comptes individuels) ; sinon, on garde
+    // l'auteur d'origine, ou le compte connecté pour une toute nouvelle saisie.
+    const creePar = isAdmin && creeParManuel.trim() ? creeParManuel.trim() : (existing?.creePar || profile?.name || "");
+    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, creePar, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, versements: editingId ? db.versements.map((x) => (x.id === editingId ? row : x)) : [...db.versements, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "versement", action: editingId ? "modification" : "création", before: existing ? { date: existing.date } : null, after: { date, banqueNom, total } });
     setDb(next);
@@ -2408,7 +2437,10 @@ function VersementView({ db, setDb, profile }) {
           <h2 className="smi-display text-2xl flex items-center gap-2"><Landmark size={22} /> Versement</h2>
           <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des dépôts du jour : versement bancaire, paiement marchand, versement au compte du DG.</p>
         </div>
-        <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
+        <div className="flex items-center gap-2">
+          {isAdmin && <Button variant="ghost" onClick={attribuerAutomatiquement}><Users size={16} /> Attribuer via passations</Button>}
+          <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
+        </div>
       </div>
 
       <Card className="max-w-md smi-no-print">
@@ -2422,6 +2454,14 @@ function VersementView({ db, setDb, profile }) {
           <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
         </div>
+        {isAdmin && (
+          <Field label="Saisi par (gérant)" hint="Pour corriger l'historique — laissez vide pour ne pas changer l'auteur déjà enregistré.">
+            <input list="smi-gerants-list-versement" className="smi-input w-full rounded-md px-3 py-2 text-sm mb-3" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={creeParManuel} onChange={(e) => setCreeParManuel(e.target.value)} placeholder={editingId ? "ex : Mamadou Diallo" : "Laissez vide pour vous attribuer la saisie"} />
+            <datalist id="smi-gerants-list-versement">
+              {gerantsStationCourante.map((g) => <option key={g.id} value={g.nom} />)}
+            </datalist>
+          </Field>
+        )}
 
         <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
           <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Versement bancaire</p>
@@ -2579,6 +2619,35 @@ function VersementView({ db, setDb, profile }) {
 // Catégorie déduite automatiquement du libellé déjà saisi (pas de champ séparé à
 // remplir) — "citerne" d'un côté, "groupe"/"transport"/"vidange" de l'autre. Les frais de
 // route suivent la même catégorie que le bon auquel ils sont rattachés.
+// Retrouve qui a réellement créé une saisie précise (Bon, Versement) via le Journal des
+// saisies — plus fiable qu'une période de passation, puisque ça capture la personne
+// effectivement connectée au moment exact de la saisie (utile par exemple quand un gérant
+// sortant fait un dernier versement juste après la passation). Le journal ne garde que les
+// 500 dernières actions du réseau entier : au-delà, plus aucune correspondance possible.
+function gerantParAudit(audit, entity, stationId, timestamp) {
+  if (!timestamp) return null;
+  const t = new Date(timestamp).getTime();
+  if (Number.isNaN(t)) return null;
+  let best = null, bestDiff = Infinity;
+  (audit || []).forEach((a) => {
+    if (a.entity !== entity || a.action !== "création" || a.stationId !== stationId) return;
+    const diff = Math.abs(new Date(a.ts).getTime() - t);
+    if (diff < bestDiff && diff < 60000) { bestDiff = diff; best = a.user; }
+  });
+  return best && best !== "—" ? best : null;
+}
+
+// Retrouve quel gérant était en poste à une station donnée, à une date donnée, à partir de
+// l'historique des passations — la dernière passation dont la date est ≤ à celle
+// recherchée indique le gérant entrant alors en fonction. Sert de solution de repli quand
+// le Journal des saisies ne couvre plus la saisie (au-delà des 500 dernières actions).
+function gerantParPassation(passations, stationId, date) {
+  const candidats = (passations || [])
+    .filter((p) => p.stationId === stationId && p.date <= date)
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  return candidats[0]?.gerantEntrant || null;
+}
+
 function bonCategorie(b) {
   const l = (b.libelle || "").toLowerCase();
   if (l.includes("citerne") || l.includes("consommation") || l.includes("pick-up") || l.includes("pick up") || l.includes("pickup")) return "citerne";
@@ -2599,8 +2668,32 @@ function BonsView({ db, setDb, profile }) {
   const [expandedDate, setExpandedDate] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [lightbox, setLightbox] = useState(null);
+  const [creeParManuel, setCreeParManuel] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
+  const isAdmin = profile.role === "admin";
+  const gerantsStationCourante = (db.gerants || []).filter((g) => g.stationId === (isGerant ? profile.stationId : stationId));
+
+  // Attribution automatique de l'auteur des anciennes saisies (sans « Saisi par » déjà
+  // renseigné) — priorité au Journal des saisies (précis, à l'action près), puis repli sur
+  // la période de passation si l'action est trop ancienne pour y figurer encore. Ne touche
+  // jamais une saisie déjà attribuée, manuellement ou automatiquement.
+  const attribuerAutomatiquement = () => {
+    let countAudit = 0, countPassation = 0;
+    const bonsMaj = db.bons.map((b) => {
+      if (b.creePar || (stationId && b.stationId !== stationId)) return b;
+      const parAudit = gerantParAudit(db.audit, "bon", b.stationId, b.timestamp);
+      if (parAudit) { countAudit++; return { ...b, creePar: parAudit }; }
+      const parPassation = gerantParPassation(db.passations, b.stationId, b.date);
+      if (parPassation) { countPassation++; return { ...b, creePar: parPassation }; }
+      return b;
+    });
+    if (countAudit + countPassation === 0) { alert("Aucune saisie sans auteur n'a pu être rattachée (ni via le Journal des saisies, ni via les passations)."); return; }
+    let next = { ...db, bons: bonsMaj };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: stationId || null, entity: "bon", action: "modification", after: { note: `Attribution automatique (${countAudit} via journal, ${countPassation} via passations)` } });
+    setDb(next);
+    alert(`${countAudit + countPassation} bon(s) attribué(s) — ${countAudit} via le Journal des saisies (précis), ${countPassation} via les passations (période estimée).`);
+  };
 
   const total = num(quantite) * num(prixUnitaire) + num(fraisRoute);
 
@@ -2616,7 +2709,7 @@ function BonsView({ db, setDb, profile }) {
   };
 
   const reset = () => {
-    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null);
+    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null); setCreeParManuel("");
   };
 
   // Charge une ligne existante dans le formulaire pour la corriger — plus besoin de
@@ -2630,6 +2723,7 @@ function BonsView({ db, setDb, profile }) {
     setPrixUnitaire(b.prixUnitaire ?? "");
     setFraisRoute(b.fraisRoute ?? "");
     setPhoto(b.photo || null);
+    setCreeParManuel(b.creePar || "");
     setEditingId(b.id);
   };
 
@@ -2641,7 +2735,8 @@ function BonsView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez une quantité et un prix, ou des frais de route."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.bons.find((b) => b.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, creePar: existing?.creePar || profile?.name || "", timestamp: existing?.timestamp || new Date().toISOString() };
+    const creePar = isAdmin && creeParManuel.trim() ? creeParManuel.trim() : (existing?.creePar || profile?.name || "");
+    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, creePar, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, bons: editingId ? db.bons.map((b) => (b.id === editingId ? row : b)) : [...db.bons, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "bon", action: editingId ? "modification" : "création", before: existing ? { libelle: existing.libelle, date: existing.date } : null, after: { date, libelle: row.libelle, total } });
     setDb(next);
@@ -2706,7 +2801,10 @@ function BonsView({ db, setDb, profile }) {
           <h2 className="smi-display text-2xl">Bons</h2>
           <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des bons de carburant (non payés en espèces).</p>
         </div>
-        <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
+        <div className="flex items-center gap-2">
+          {isAdmin && <Button variant="ghost" onClick={attribuerAutomatiquement}><Users size={16} /> Attribuer via passations</Button>}
+          <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
+        </div>
       </div>
 
       <Card className="max-w-md smi-no-print">
@@ -2720,6 +2818,14 @@ function BonsView({ db, setDb, profile }) {
           <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
         </div>
+        {isAdmin && (
+          <Field label="Saisi par (gérant)" hint="Pour corriger l'historique — laissez vide pour ne pas changer l'auteur déjà enregistré.">
+            <input list="smi-gerants-list-bons" className="smi-input w-full rounded-md px-3 py-2 text-sm mb-3" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={creeParManuel} onChange={(e) => setCreeParManuel(e.target.value)} placeholder={editingId ? "ex : Mamadou Diallo" : "Laissez vide pour vous attribuer la saisie"} />
+            <datalist id="smi-gerants-list-bons">
+              {gerantsStationCourante.map((g) => <option key={g.id} value={g.nom} />)}
+            </datalist>
+          </Field>
+        )}
 
         <div className="flex flex-col gap-3">
           <Field label="Libellé" hint="Utilisez « Citerne », « Consommation » ou « Pick-up » pour la catégorie Citerne, ou « Groupe / Transport / Vidange » pour l'autre catégorie — sinon, classé en « Autre bon ».">
