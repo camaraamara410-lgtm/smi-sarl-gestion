@@ -2344,7 +2344,7 @@ function VersementView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez au moins un montant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.versements.find((x) => x.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, creePar: existing?.creePar || profile?.name || "", timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, versements: editingId ? db.versements.map((x) => (x.id === editingId ? row : x)) : [...db.versements, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "versement", action: editingId ? "modification" : "création", before: existing ? { date: existing.date } : null, after: { date, banqueNom, total } });
     setDb(next);
@@ -2387,6 +2387,16 @@ function VersementView({ db, setDb, profile }) {
   const cumulBancaire = history.reduce((a, v) => a + num(v.banqueMontant), 0);
   const cumulMarchand = history.reduce((a, v) => a + num(v.paiementMarchandMontant), 0);
   const cumulAutre = history.reduce((a, v) => a + num(v.autreMontant), 0);
+  // Cumul par gérant — pour distinguer, notamment après une passation, ce que chaque
+  // personne a réellement versé, même si plusieurs se sont succédé sur la même station.
+  const cumulParGerant = useMemo(() => {
+    const map = new Map();
+    history.forEach((v) => {
+      const nom = v.creePar || "Non identifié";
+      map.set(nom, (map.get(nom) || 0) + versementTotal(v));
+    });
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [history]);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2483,6 +2493,20 @@ function VersementView({ db, setDb, profile }) {
             </div>
           </div>
         )}
+
+        {cumulParGerant.length > 0 && (
+          <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+            <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Cumul par gérant</p>
+            <div className="flex flex-col gap-1.5">
+              {cumulParGerant.map(([nom, montant]) => (
+                <div key={nom} className="flex items-center justify-between text-xs">
+                  <span>{nom}</span>
+                  <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(montant, devise)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {grouped.length === 0 ? (
           <EmptyState icon={Landmark} title="Aucun versement enregistré" hint="Les versements enregistrés apparaîtront ici." />
         ) : (
@@ -2519,6 +2543,7 @@ function VersementView({ db, setDb, profile }) {
                               {v.recuNumero && <span>N° de reçu : <span className="smi-mono" style={{ color: C.text }}>{v.recuNumero}</span></span>}
                               {num(v.paiementMarchandMontant) > 0 && <span>Paiement marchand : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.paiementMarchandMontant, dv)}</span></span>}
                               {num(v.autreMontant) > 0 && <span>Versement au compte du DG{v.autreLibelle ? ` (${v.autreLibelle})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
+                              {v.creePar && <span style={{ color: C.textFaint }}>Saisi par : {v.creePar}</span>}
                             </div>
                             <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(vTotal, dv)}</span>
                             <button onClick={() => startEdit(v)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
@@ -2615,7 +2640,7 @@ function BonsView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez une quantité et un prix, ou des frais de route."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.bons.find((b) => b.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, creePar: existing?.creePar || profile?.name || "", timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, bons: editingId ? db.bons.map((b) => (b.id === editingId ? row : b)) : [...db.bons, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "bon", action: editingId ? "modification" : "création", before: existing ? { libelle: existing.libelle, date: existing.date } : null, after: { date, libelle: row.libelle, total } });
     setDb(next);
@@ -2660,6 +2685,16 @@ function BonsView({ db, setDb, profile }) {
   const cumulCiterne = history.filter((b) => bonCategorie(b) === "citerne").reduce((a, b) => a + bonTotal(b), 0);
   const cumulGroupeTransport = history.filter((b) => bonCategorie(b) === "groupe_transport_vidange").reduce((a, b) => a + bonTotal(b), 0);
   const cumulAutreBon = history.filter((b) => bonCategorie(b) === "autre").reduce((a, b) => a + bonTotal(b), 0);
+  // Cumul par gérant — pour distinguer, notamment après une passation, ce que chaque
+  // personne a réellement saisi en bons, même si plusieurs se sont succédé sur la station.
+  const cumulBonsParGerant = useMemo(() => {
+    const map = new Map();
+    history.forEach((b) => {
+      const nom = b.creePar || "Non identifié";
+      map.set(nom, (map.get(nom) || 0) + bonTotal(b));
+    });
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [history]);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2746,6 +2781,20 @@ function BonsView({ db, setDb, profile }) {
             </div>
           </div>
         )}
+
+        {cumulBonsParGerant.length > 0 && (
+          <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+            <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Cumul par gérant</p>
+            <div className="flex flex-col gap-1.5">
+              {cumulBonsParGerant.map(([nom, montant]) => (
+                <div key={nom} className="flex items-center justify-between text-xs">
+                  <span>{nom}</span>
+                  <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(montant, devise)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {grouped.length === 0 ? (
           <EmptyState icon={Wallet} title="Aucun bon enregistré" hint="Les bons enregistrés apparaîtront ici." />
         ) : (
@@ -2780,6 +2829,7 @@ function BonsView({ db, setDb, profile }) {
                             <Pill tone={bonCategorie(b) === "groupe_transport_vidange" ? "teal" : bonCategorie(b) === "autre" ? "muted" : "amber"}>{bonCategorie(b) === "groupe_transport_vidange" ? "Groupe/Transport/Vidange" : bonCategorie(b) === "autre" ? "Autre bon" : "Citerne"}</Pill>
                             {num(b.quantite) > 0 && <span> · {fmtVol(b.quantite)} × {fmtMontant(b.prixUnitaire, dv)}</span>}
                             {num(b.fraisRoute) > 0 && <span> · Frais : {fmtMontant(b.fraisRoute, dv)}</span>}
+                            {b.creePar && <span style={{ color: C.textFaint }}> · Saisi par : {b.creePar}</span>}
                           </div>
                           <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(bonTotal(b), dv)}</span>
                           <button onClick={() => startEdit(b)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
