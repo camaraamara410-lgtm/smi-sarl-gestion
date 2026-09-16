@@ -1843,10 +1843,11 @@ function StockView({ db, setDb, profile }) {
       setOuvE(ouvertureEssence);
       setOuvG(ouvertureGasoil);
       setLivE(""); setLivG("");
-      // Comptage physique du jour pré-rempli avec ce même point de départ — à corriger
-      // selon le comptage réel une fois les livraisons et ventes du jour prises en compte.
-      setPhysE(ouvertureEssence);
-      setPhysG(ouvertureGasoil);
+      // Le comptage physique du jour reste VOLONTAIREMENT vide — il doit venir d'un
+      // jaugeage réel fait ce jour-là, jamais d'une valeur reprise automatiquement.
+      // Le pré-remplir avec la veille masquait l'écart réel : si le gérant oubliait de le
+      // corriger, l'écart calculé ne reflétait plus le jaugeage, juste ventes − livraisons.
+      setPhysE(""); setPhysG("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
@@ -1871,7 +1872,7 @@ function StockView({ db, setDb, profile }) {
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Contrôle Stock</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Stock de clôture calculé automatiquement ; le comptage physique du jour devient le stock d'ouverture du lendemain.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Stock de clôture calculé automatiquement ; le comptage physique doit être saisi chaque jour par un vrai jaugeage, et devient le stock d'ouverture du lendemain.</p>
       </div>
 
       <Card>
@@ -1892,7 +1893,7 @@ function StockView({ db, setDb, profile }) {
               <Field label="Stock clôture (auto)"><div className="pt-1"><GaugeNumber value={fmtVol(r.close)} tone={r.tone} /></div></Field>
             </div>
             <div className="grid sm:grid-cols-2 gap-2 mt-2">
-              <Field label="Comptage physique (L)" hint="Deviendra le stock d'ouverture du lendemain — à corriger selon le comptage réel du jour"><NumberInput value={r.phys} onChange={(e) => r.setPhys(e.target.value)} /></Field>
+              <Field label="Comptage physique (L)" hint="À saisir obligatoirement par jaugeage réel du jour — deviendra le stock d'ouverture du lendemain"><NumberInput value={r.phys} onChange={(e) => r.setPhys(e.target.value)} /></Field>
               <Field label="Écart constaté (auto)">
                 <div className="pt-1"><GaugeNumber value={fmtEcart(r.ecart)} tone={r.ecart !== null && Math.abs(r.ecart) > 0.001 ? "danger" : "muted"} /></div>
               </Field>
@@ -4896,7 +4897,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stock", title: "Contrôle Stock", adminOnly: false,
-    text: "Le stock d'ouverture du jour reprend automatiquement le stock PHYSIQUE constaté la veille (pas le stock théorique) — pour que le comptage réel serve de référence d'un jour sur l'autre. Le comptage physique du jour est pré-rempli avec ce même point de départ ; corrigez-le selon le comptage réel une fois les livraisons et ventes prises en compte, puisqu'il deviendra à son tour le stock d'ouverture du lendemain. L'écart entre stock théorique calculé et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
+    text: "Le stock d'ouverture du jour reprend automatiquement le stock PHYSIQUE constaté la veille (pas le stock théorique) — pour que le comptage réel serve de référence d'un jour sur l'autre. Le comptage physique du jour, lui, part TOUJOURS vide : il doit être saisi chaque jour par un vrai jaugeage de la cuve, jamais repris automatiquement — sinon l'écart affiché ne refléterait plus un vrai contrôle physique. Il devient à son tour le stock d'ouverture du lendemain une fois saisi. L'écart entre stock théorique calculé et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
   },
   {
     key: "caisse", title: "Caisse", adminOnly: false,
