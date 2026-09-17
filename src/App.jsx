@@ -468,19 +468,37 @@ function ecartCaisseCumule(db, stationId) {
 // cuve) fiable même avec des trous dans les saisies — l'équivalent, pour le carburant, de
 // l'Écart de caisse cumulé ci-dessus.
 function ecartStockCumule(db, stationId) {
+  const station = (db.stations || []).find((s) => s.id === stationId);
+  const refDate = station?.stockReferenceDate || null;
+
   const stocksStation = (db.stocks || []).filter((s) => s.stationId === stationId).sort((a, b) => (a.date < b.date ? -1 : 1));
   if (stocksStation.length === 0) return null;
-  const premier = stocksStation[0];
   const dernier = stocksStation[stocksStation.length - 1];
-  const stockDepartEssence = num(premier.stockOuvertureEssence);
-  const stockDepartGasoil = num(premier.stockOuvertureGasoil);
-  const receptionsEssence = stocksStation.reduce((a, s) => a + num(s.livraisonEssence), 0);
-  const receptionsGasoil = stocksStation.reduce((a, s) => a + num(s.livraisonGasoil), 0);
+
+  // Stock de départ : la « Stock de référence » saisie dans Stations si elle existe (comme
+  // la ligne de départ d'un tableau Excel), sinon la toute première saisie Stock de l'app.
+  let dateDepart, stockDepartEssence, stockDepartGasoil, stocksApresDepart;
+  if (refDate) {
+    dateDepart = refDate;
+    stockDepartEssence = num(station.stockReferenceEssence);
+    stockDepartGasoil = num(station.stockReferenceGasoil);
+    stocksApresDepart = stocksStation.filter((s) => s.date > refDate);
+  } else {
+    const premier = stocksStation[0];
+    dateDepart = premier.date;
+    stockDepartEssence = num(premier.stockOuvertureEssence);
+    stockDepartGasoil = num(premier.stockOuvertureGasoil);
+    stocksApresDepart = stocksStation.slice(1);
+  }
+  const receptionsEssence = stocksApresDepart.reduce((a, s) => a + num(s.livraisonEssence), 0);
+  const receptionsGasoil = stocksApresDepart.reduce((a, s) => a + num(s.livraisonGasoil), 0);
 
   let venduEssence = 0, venduGasoil = 0;
   const pompesStation = (db.pompes || []).filter((p) => p.stationId === stationId);
   pompesStation.forEach((p) => {
-    const relevesP = (db.releves || []).filter((r) => r.stationId === stationId && r.pompeId === p.id).sort((a, b) => (a.date < b.date ? -1 : 1));
+    const relevesP = (db.releves || [])
+      .filter((r) => r.stationId === stationId && r.pompeId === p.id && (!refDate || r.date > refDate))
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
     if (relevesP.length === 0) return;
     const first = relevesP[0], last = relevesP[relevesP.length - 1];
     venduEssence += Math.max(0, num(last.indexClotureEssence) - num(first.indexOuvertureEssence));
@@ -493,7 +511,7 @@ function ecartStockCumule(db, stationId) {
   const stockPhysiqueEssence = stockAffichable(dernierCompute, "essence");
   const stockPhysiqueGasoil = stockAffichable(dernierCompute, "gasoil");
   return {
-    dateDepart: premier.date,
+    dateDepart,
     dateActuelle: dernier.date,
     stockTheoriqueEssence, stockTheoriqueGasoil,
     stockPhysiqueEssence, stockPhysiqueGasoil,
@@ -1090,6 +1108,15 @@ function StationsView({ db, setDb, profile }) {
             </Field>
             <Field label="Date de cette caisse de référence" hint="Seuls les mouvements (ventes, bons, versements) postérieurs à cette date sont ajoutés au calcul.">
               <TextInput type="date" value={form.caisseReferenceDate || ""} onChange={(e) => setForm({ ...form, caisseReferenceDate: e.target.value })} max={todayISO()} />
+            </Field>
+            <Field label="Stock de référence — Essence (L)" hint="Stock jaugé vérifié à la date ci-dessous. Sert de point de départ à l'Écart de stock cuve du Tableau de bord, au lieu de partir de la toute première saisie Stock de l'app.">
+              <NumberInput value={form.stockReferenceEssence ?? ""} onChange={(e) => setForm({ ...form, stockReferenceEssence: e.target.value })} />
+            </Field>
+            <Field label="Stock de référence — Gasoil (L)" hint="Même principe que ci-dessus, pour le gasoil.">
+              <NumberInput value={form.stockReferenceGasoil ?? ""} onChange={(e) => setForm({ ...form, stockReferenceGasoil: e.target.value })} />
+            </Field>
+            <Field label="Date de ce stock de référence" hint="Seules les réceptions et les ventes pompées postérieures à cette date sont ajoutées au calcul.">
+              <TextInput type="date" value={form.stockReferenceDate || ""} onChange={(e) => setForm({ ...form, stockReferenceDate: e.target.value })} max={todayISO()} />
             </Field>
             <Field label="Couleur de la station" hint="Pour la repérer facilement sur ses cartes dans l'application.">
               <div className="flex gap-2 flex-wrap items-center">
@@ -4897,7 +4924,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
-    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. La « Caisse de référence » (montant + date) sert de point de départ vérifié à l'Écart de caisse cumulé du Tableau de bord — renseignez-y un solde de caisse compté/audité et sa date à chaque fois que vous voulez repartir d'une base sûre (comme la première ligne d'un tableau de suivi Excel), au lieu de laisser l'app recalculer depuis toute la saisie de la station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
+    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. La « Caisse de référence » (montant + date) et le « Stock de référence » (essence/gasoil en L + date) servent de point de départ vérifié aux écarts cumulés du Tableau de bord (Écart de caisse et Écart de stock cuve) — renseignez-y un solde compté/audité et sa date à chaque fois que vous voulez repartir d'une base sûre (comme la première ligne d'un tableau de suivi Excel), au lieu de laisser l'app recalculer depuis toute la saisie de la station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
   },
   {
     key: "passations", title: "Passation", adminOnly: true,
