@@ -71,11 +71,6 @@ const FONTS = `
      une miniature de 40px à l'écran ne sert à rien sur papier. */
   .smi-print-photo { width: 220px !important; height: 220px !important; object-fit: contain !important; display: block !important; margin: 6px 0 !important; }
   .smi-print-photo-row { flex-direction: column !important; align-items: flex-start !important; }
-  /* Une zone imprimable en fenêtre modale (ex. fiche de passation) a souvent une hauteur
-     limitée avec défilement à l'écran, et une largeur volontairement réduite (max-w-lg)
-     pour rester lisible dans une fenêtre — à l'impression, ces deux limites doivent
-     sauter pour que le document occupe toute la page, pas juste une carte centrée. */
-  .smi-print-area { max-height: none !important; overflow: visible !important; position: static !important; max-width: none !important; width: 100% !important; margin: 0 !important; padding: 24px !important; }
 }
 `;
 
@@ -430,6 +425,28 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
   return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
+}
+
+// Écart de caisse cumulé d'une station : montant théorique actuellement en caisse / non
+// encore versé, recalculé directement depuis l'historique complet des ventes, bons et
+// versements de la station — sans dépendre de la saisie manuelle jour par jour de
+// « Caisse précédente » dans l'onglet Caisse (ce report manuel peut être oublié ou mal
+// renseigné, ex. après un versement partiel d'un solde accumulé sur plusieurs jours).
+// C'est l'équivalent du « Solde caisse théorique cumulé » d'un suivi Excel classique :
+// Σ(CA de tous les jours) − Σ(tous les Bons) − Σ(tous les Versements, y compris paiement
+// marchand) − Σ(paiement marchand saisi manuellement dans Caisse, ancienne saisie).
+function ecartCaisseCumule(db, stationId) {
+  const dates = new Set();
+  (db.releves || []).forEach((r) => { if (r.stationId === stationId) dates.add(r.date); });
+  (db.ventes || []).forEach((v) => { if (v.stationId === stationId) dates.add(v.date); });
+  let ca = 0;
+  dates.forEach((date) => { ca += computeVente(db.releves, db.ventes, stationId, date).ca; });
+  const bonsStation = (db.bons || []).filter((b) => b.stationId === stationId);
+  const versementsStation = (db.versements || []).filter((v) => v.stationId === stationId);
+  const totalBon = sumBons(bonsStation);
+  const totalVersement = sumVersements(versementsStation);
+  const totalPaiementMarchandManuel = (db.caisses || []).filter((c) => c.stationId === stationId).reduce((a, c) => a + num(c.totalPaiementMarchand), 0);
+  return ca - totalBon - totalVersement - totalPaiementMarchandManuel;
 }
 
 /* --------------------------- Persistence hook -------------------------- */
@@ -1843,11 +1860,10 @@ function StockView({ db, setDb, profile }) {
       setOuvE(ouvertureEssence);
       setOuvG(ouvertureGasoil);
       setLivE(""); setLivG("");
-      // Le comptage physique du jour reste VOLONTAIREMENT vide — il doit venir d'un
-      // jaugeage réel fait ce jour-là, jamais d'une valeur reprise automatiquement.
-      // Le pré-remplir avec la veille masquait l'écart réel : si le gérant oubliait de le
-      // corriger, l'écart calculé ne reflétait plus le jaugeage, juste ventes − livraisons.
-      setPhysE(""); setPhysG("");
+      // Comptage physique du jour pré-rempli avec ce même point de départ — à corriger
+      // selon le comptage réel une fois les livraisons et ventes du jour prises en compte.
+      setPhysE(ouvertureEssence);
+      setPhysG(ouvertureGasoil);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
@@ -1872,7 +1888,7 @@ function StockView({ db, setDb, profile }) {
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Contrôle Stock</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Stock de clôture calculé automatiquement ; le comptage physique doit être saisi chaque jour par un vrai jaugeage, et devient le stock d'ouverture du lendemain.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Stock de clôture calculé automatiquement ; le comptage physique du jour devient le stock d'ouverture du lendemain.</p>
       </div>
 
       <Card>
@@ -1893,7 +1909,7 @@ function StockView({ db, setDb, profile }) {
               <Field label="Stock clôture (auto)"><div className="pt-1"><GaugeNumber value={fmtVol(r.close)} tone={r.tone} /></div></Field>
             </div>
             <div className="grid sm:grid-cols-2 gap-2 mt-2">
-              <Field label="Comptage physique (L)" hint="À saisir obligatoirement par jaugeage réel du jour — deviendra le stock d'ouverture du lendemain"><NumberInput value={r.phys} onChange={(e) => r.setPhys(e.target.value)} /></Field>
+              <Field label="Comptage physique (L)" hint="Deviendra le stock d'ouverture du lendemain — à corriger selon le comptage réel du jour"><NumberInput value={r.phys} onChange={(e) => r.setPhys(e.target.value)} /></Field>
               <Field label="Écart constaté (auto)">
                 <div className="pt-1"><GaugeNumber value={fmtEcart(r.ecart)} tone={r.ecart !== null && Math.abs(r.ecart) > 0.001 ? "danger" : "muted"} /></div>
               </Field>
@@ -2301,32 +2317,8 @@ function VersementView({ db, setDb, profile }) {
   const [expandedDate, setExpandedDate] = useState(null);
   const [lightbox, setLightbox] = useState(null);
   const [editingId, setEditingId] = useState(null);
-  const [creeParManuel, setCreeParManuel] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
-  const isAdmin = profile.role === "admin";
-  const gerantsStationCourante = (db.gerants || []).filter((g) => g.stationId === (isGerant ? profile.stationId : stationId));
-
-  // Attribution automatique de l'auteur des anciennes saisies (sans « Saisi par » déjà
-  // renseigné) — priorité au Journal des saisies (précis, à l'action près), puis repli sur
-  // la période de passation si l'action est trop ancienne pour y figurer encore. Ne touche
-  // jamais une saisie déjà attribuée, manuellement ou automatiquement.
-  const attribuerAutomatiquement = () => {
-    let countAudit = 0, countPassation = 0;
-    const versementsMaj = db.versements.map((v) => {
-      if (v.creePar || (stationId && v.stationId !== stationId)) return v;
-      const parAudit = gerantParAudit(db.audit, "versement", v.stationId, v.timestamp);
-      if (parAudit) { countAudit++; return { ...v, creePar: parAudit }; }
-      const parPassation = gerantParPassation(db.passations, v.stationId, v.date);
-      if (parPassation) { countPassation++; return { ...v, creePar: parPassation }; }
-      return v;
-    });
-    if (countAudit + countPassation === 0) { alert("Aucune saisie sans auteur n'a pu être rattachée (ni via le Journal des saisies, ni via les passations)."); return; }
-    let next = { ...db, versements: versementsMaj };
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: stationId || null, entity: "versement", action: "modification", after: { note: `Attribution automatique (${countAudit} via journal, ${countPassation} via passations)` } });
-    setDb(next);
-    alert(`${countAudit + countPassation} versement(s) attribué(s) — ${countAudit} via le Journal des saisies (précis), ${countPassation} via les passations (période estimée).`);
-  };
 
   const total = num(banqueMontant) + num(paiementMarchandMontant) + num(autreMontant);
 
@@ -2343,7 +2335,7 @@ function VersementView({ db, setDb, profile }) {
 
   const reset = () => {
     setBanqueNom(""); setBanqueMontant(""); setBanquePhoto(null); setRecuNumero("");
-    setPaiementMarchandMontant(""); setAutreMontant(""); setAutreLibelle(""); setEditingId(null); setCreeParManuel("");
+    setPaiementMarchandMontant(""); setAutreMontant(""); setAutreLibelle(""); setEditingId(null);
   };
 
   // Charge un versement existant dans le formulaire pour le corriger — plus besoin de
@@ -2359,7 +2351,6 @@ function VersementView({ db, setDb, profile }) {
     setPaiementMarchandMontant(v.paiementMarchandMontant ?? "");
     setAutreMontant(v.autreMontant ?? "");
     setAutreLibelle(v.autreLibelle || "");
-    setCreeParManuel(v.creePar || "");
     setEditingId(v.id);
   };
 
@@ -2370,11 +2361,7 @@ function VersementView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez au moins un montant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.versements.find((x) => x.id === editingId) : null;
-    // L'admin peut corriger manuellement qui a fait la saisie (utile pour l'historique
-    // enregistré avant la mise en place des comptes individuels) ; sinon, on garde
-    // l'auteur d'origine, ou le compte connecté pour une toute nouvelle saisie.
-    const creePar = isAdmin && creeParManuel.trim() ? creeParManuel.trim() : (existing?.creePar || profile?.name || "");
-    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, creePar, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, banqueNom, banqueMontant, banquePhoto, recuNumero, paiementMarchandMontant, autreMontant, autreLibelle, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, versements: editingId ? db.versements.map((x) => (x.id === editingId ? row : x)) : [...db.versements, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "versement", action: editingId ? "modification" : "création", before: existing ? { date: existing.date } : null, after: { date, banqueNom, total } });
     setDb(next);
@@ -2417,16 +2404,6 @@ function VersementView({ db, setDb, profile }) {
   const cumulBancaire = history.reduce((a, v) => a + num(v.banqueMontant), 0);
   const cumulMarchand = history.reduce((a, v) => a + num(v.paiementMarchandMontant), 0);
   const cumulAutre = history.reduce((a, v) => a + num(v.autreMontant), 0);
-  // Cumul par gérant — pour distinguer, notamment après une passation, ce que chaque
-  // personne a réellement versé, même si plusieurs se sont succédé sur la même station.
-  const cumulParGerant = useMemo(() => {
-    const map = new Map();
-    history.forEach((v) => {
-      const nom = v.creePar || "Non identifié";
-      map.set(nom, (map.get(nom) || 0) + versementTotal(v));
-    });
-    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
-  }, [history]);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2437,10 +2414,7 @@ function VersementView({ db, setDb, profile }) {
           <h2 className="smi-display text-2xl flex items-center gap-2"><Landmark size={22} /> Versement</h2>
           <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des dépôts du jour : versement bancaire, paiement marchand, versement au compte du DG.</p>
         </div>
-        <div className="flex items-center gap-2">
-          {isAdmin && <Button variant="ghost" onClick={attribuerAutomatiquement}><Users size={16} /> Attribuer via passations</Button>}
-          <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
-        </div>
+        <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
       </div>
 
       <Card className="max-w-md smi-no-print">
@@ -2454,14 +2428,6 @@ function VersementView({ db, setDb, profile }) {
           <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
         </div>
-        {isAdmin && (
-          <Field label="Saisi par (gérant)" hint="Pour corriger l'historique — laissez vide pour ne pas changer l'auteur déjà enregistré.">
-            <input list="smi-gerants-list-versement" className="smi-input w-full rounded-md px-3 py-2 text-sm mb-3" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={creeParManuel} onChange={(e) => setCreeParManuel(e.target.value)} placeholder={editingId ? "ex : Mamadou Diallo" : "Laissez vide pour vous attribuer la saisie"} />
-            <datalist id="smi-gerants-list-versement">
-              {gerantsStationCourante.map((g) => <option key={g.id} value={g.nom} />)}
-            </datalist>
-          </Field>
-        )}
 
         <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
           <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Versement bancaire</p>
@@ -2534,20 +2500,6 @@ function VersementView({ db, setDb, profile }) {
             </div>
           </div>
         )}
-
-        {cumulParGerant.length > 0 && (
-          <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-            <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Cumul par gérant</p>
-            <div className="flex flex-col gap-1.5">
-              {cumulParGerant.map(([nom, montant]) => (
-                <div key={nom} className="flex items-center justify-between text-xs">
-                  <span>{nom}</span>
-                  <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(montant, devise)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
         {grouped.length === 0 ? (
           <EmptyState icon={Landmark} title="Aucun versement enregistré" hint="Les versements enregistrés apparaîtront ici." />
         ) : (
@@ -2584,7 +2536,6 @@ function VersementView({ db, setDb, profile }) {
                               {v.recuNumero && <span>N° de reçu : <span className="smi-mono" style={{ color: C.text }}>{v.recuNumero}</span></span>}
                               {num(v.paiementMarchandMontant) > 0 && <span>Paiement marchand : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.paiementMarchandMontant, dv)}</span></span>}
                               {num(v.autreMontant) > 0 && <span>Versement au compte du DG{v.autreLibelle ? ` (${v.autreLibelle})` : ""} : <span className="smi-mono" style={{ color: C.text }}>{fmtMontant(v.autreMontant, dv)}</span></span>}
-                              {v.creePar && <span style={{ color: C.textFaint }}>Saisi par : {v.creePar}</span>}
                             </div>
                             <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(vTotal, dv)}</span>
                             <button onClick={() => startEdit(v)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
@@ -2619,40 +2570,10 @@ function VersementView({ db, setDb, profile }) {
 // Catégorie déduite automatiquement du libellé déjà saisi (pas de champ séparé à
 // remplir) — "citerne" d'un côté, "groupe"/"transport"/"vidange" de l'autre. Les frais de
 // route suivent la même catégorie que le bon auquel ils sont rattachés.
-// Retrouve qui a réellement créé une saisie précise (Bon, Versement) via le Journal des
-// saisies — plus fiable qu'une période de passation, puisque ça capture la personne
-// effectivement connectée au moment exact de la saisie (utile par exemple quand un gérant
-// sortant fait un dernier versement juste après la passation). Le journal ne garde que les
-// 500 dernières actions du réseau entier : au-delà, plus aucune correspondance possible.
-function gerantParAudit(audit, entity, stationId, timestamp) {
-  if (!timestamp) return null;
-  const t = new Date(timestamp).getTime();
-  if (Number.isNaN(t)) return null;
-  let best = null, bestDiff = Infinity;
-  (audit || []).forEach((a) => {
-    if (a.entity !== entity || a.action !== "création" || a.stationId !== stationId) return;
-    const diff = Math.abs(new Date(a.ts).getTime() - t);
-    if (diff < bestDiff && diff < 60000) { bestDiff = diff; best = a.user; }
-  });
-  return best && best !== "—" ? best : null;
-}
-
-// Retrouve quel gérant était en poste à une station donnée, à une date donnée, à partir de
-// l'historique des passations — la dernière passation dont la date est ≤ à celle
-// recherchée indique le gérant entrant alors en fonction. Sert de solution de repli quand
-// le Journal des saisies ne couvre plus la saisie (au-delà des 500 dernières actions).
-function gerantParPassation(passations, stationId, date) {
-  const candidats = (passations || [])
-    .filter((p) => p.stationId === stationId && p.date <= date)
-    .sort((a, b) => (a.date < b.date ? 1 : -1));
-  return candidats[0]?.gerantEntrant || null;
-}
-
 function bonCategorie(b) {
   const l = (b.libelle || "").toLowerCase();
-  if (l.includes("citerne") || l.includes("consommation") || l.includes("pick-up") || l.includes("pick up") || l.includes("pickup")) return "citerne";
   if (l.includes("groupe") || l.includes("transport") || l.includes("vidange")) return "groupe_transport_vidange";
-  return "autre";
+  return "citerne";
 }
 
 function BonsView({ db, setDb, profile }) {
@@ -2668,32 +2589,8 @@ function BonsView({ db, setDb, profile }) {
   const [expandedDate, setExpandedDate] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [lightbox, setLightbox] = useState(null);
-  const [creeParManuel, setCreeParManuel] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
-  const isAdmin = profile.role === "admin";
-  const gerantsStationCourante = (db.gerants || []).filter((g) => g.stationId === (isGerant ? profile.stationId : stationId));
-
-  // Attribution automatique de l'auteur des anciennes saisies (sans « Saisi par » déjà
-  // renseigné) — priorité au Journal des saisies (précis, à l'action près), puis repli sur
-  // la période de passation si l'action est trop ancienne pour y figurer encore. Ne touche
-  // jamais une saisie déjà attribuée, manuellement ou automatiquement.
-  const attribuerAutomatiquement = () => {
-    let countAudit = 0, countPassation = 0;
-    const bonsMaj = db.bons.map((b) => {
-      if (b.creePar || (stationId && b.stationId !== stationId)) return b;
-      const parAudit = gerantParAudit(db.audit, "bon", b.stationId, b.timestamp);
-      if (parAudit) { countAudit++; return { ...b, creePar: parAudit }; }
-      const parPassation = gerantParPassation(db.passations, b.stationId, b.date);
-      if (parPassation) { countPassation++; return { ...b, creePar: parPassation }; }
-      return b;
-    });
-    if (countAudit + countPassation === 0) { alert("Aucune saisie sans auteur n'a pu être rattachée (ni via le Journal des saisies, ni via les passations)."); return; }
-    let next = { ...db, bons: bonsMaj };
-    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: stationId || null, entity: "bon", action: "modification", after: { note: `Attribution automatique (${countAudit} via journal, ${countPassation} via passations)` } });
-    setDb(next);
-    alert(`${countAudit + countPassation} bon(s) attribué(s) — ${countAudit} via le Journal des saisies (précis), ${countPassation} via les passations (période estimée).`);
-  };
 
   const total = num(quantite) * num(prixUnitaire) + num(fraisRoute);
 
@@ -2709,7 +2606,7 @@ function BonsView({ db, setDb, profile }) {
   };
 
   const reset = () => {
-    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null); setCreeParManuel("");
+    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null);
   };
 
   // Charge une ligne existante dans le formulaire pour la corriger — plus besoin de
@@ -2723,7 +2620,6 @@ function BonsView({ db, setDb, profile }) {
     setPrixUnitaire(b.prixUnitaire ?? "");
     setFraisRoute(b.fraisRoute ?? "");
     setPhoto(b.photo || null);
-    setCreeParManuel(b.creePar || "");
     setEditingId(b.id);
   };
 
@@ -2735,8 +2631,7 @@ function BonsView({ db, setDb, profile }) {
     if (total <= 0) { setErr("Indiquez une quantité et un prix, ou des frais de route."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.bons.find((b) => b.id === editingId) : null;
-    const creePar = isAdmin && creeParManuel.trim() ? creeParManuel.trim() : (existing?.creePar || profile?.name || "");
-    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, creePar, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, bons: editingId ? db.bons.map((b) => (b.id === editingId ? row : b)) : [...db.bons, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "bon", action: editingId ? "modification" : "création", before: existing ? { libelle: existing.libelle, date: existing.date } : null, after: { date, libelle: row.libelle, total } });
     setDb(next);
@@ -2780,17 +2675,6 @@ function BonsView({ db, setDb, profile }) {
   const cumulTotal = history.reduce((a, b) => a + bonTotal(b), 0);
   const cumulCiterne = history.filter((b) => bonCategorie(b) === "citerne").reduce((a, b) => a + bonTotal(b), 0);
   const cumulGroupeTransport = history.filter((b) => bonCategorie(b) === "groupe_transport_vidange").reduce((a, b) => a + bonTotal(b), 0);
-  const cumulAutreBon = history.filter((b) => bonCategorie(b) === "autre").reduce((a, b) => a + bonTotal(b), 0);
-  // Cumul par gérant — pour distinguer, notamment après une passation, ce que chaque
-  // personne a réellement saisi en bons, même si plusieurs se sont succédé sur la station.
-  const cumulBonsParGerant = useMemo(() => {
-    const map = new Map();
-    history.forEach((b) => {
-      const nom = b.creePar || "Non identifié";
-      map.set(nom, (map.get(nom) || 0) + bonTotal(b));
-    });
-    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
-  }, [history]);
   const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   const exportPdf = () => window.print();
 
@@ -2801,10 +2685,7 @@ function BonsView({ db, setDb, profile }) {
           <h2 className="smi-display text-2xl">Bons</h2>
           <p className="text-sm" style={{ color: C.textMuted }}>Enregistrement des bons de carburant (non payés en espèces).</p>
         </div>
-        <div className="flex items-center gap-2">
-          {isAdmin && <Button variant="ghost" onClick={attribuerAutomatiquement}><Users size={16} /> Attribuer via passations</Button>}
-          <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
-        </div>
+        <Button variant="ghost" onClick={exportPdf} disabled={grouped.length === 0}><Printer size={16} /> Exporter en PDF</Button>
       </div>
 
       <Card className="max-w-md smi-no-print">
@@ -2818,17 +2699,9 @@ function BonsView({ db, setDb, profile }) {
           <Field label="Station"><StationSelect stations={db.stations} value={stationId} onChange={setStationId} disabled={isGerant} /></Field>
           <Field label="Date"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} /></Field>
         </div>
-        {isAdmin && (
-          <Field label="Saisi par (gérant)" hint="Pour corriger l'historique — laissez vide pour ne pas changer l'auteur déjà enregistré.">
-            <input list="smi-gerants-list-bons" className="smi-input w-full rounded-md px-3 py-2 text-sm mb-3" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={creeParManuel} onChange={(e) => setCreeParManuel(e.target.value)} placeholder={editingId ? "ex : Mamadou Diallo" : "Laissez vide pour vous attribuer la saisie"} />
-            <datalist id="smi-gerants-list-bons">
-              {gerantsStationCourante.map((g) => <option key={g.id} value={g.nom} />)}
-            </datalist>
-          </Field>
-        )}
 
         <div className="flex flex-col gap-3">
-          <Field label="Libellé" hint="Utilisez « Citerne », « Consommation » ou « Pick-up » pour la catégorie Citerne, ou « Groupe / Transport / Vidange » pour l'autre catégorie — sinon, classé en « Autre bon ».">
+          <Field label="Libellé" hint="Utilisez « Citerne » ou « Groupe / Transport / Vidange » dans le libellé pour un classement automatique correct dans les cumuls.">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="ex : Citerne BI 7077" />
           </Field>
           <div className="grid sm:grid-cols-3 gap-3">
@@ -2869,7 +2742,7 @@ function BonsView({ db, setDb, profile }) {
         </div>
         <p className="font-semibold text-sm mb-3">Historique des bons</p>
         {grouped.length > 0 && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+          <div className="grid grid-cols-3 gap-3 mb-3">
             <div className="rounded-md p-3" style={{ background: C.amberSoft, border: `1px solid ${C.amberDim}` }}>
               <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.amber }}>Cumul total</p>
               <GaugeNumber value={fmtMontant(cumulTotal, devise)} tone="amber" />
@@ -2881,24 +2754,6 @@ function BonsView({ db, setDb, profile }) {
             <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
               <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Groupe/Transport/Vidange</p>
               <GaugeNumber value={fmtMontant(cumulGroupeTransport, devise)} />
-            </div>
-            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Cumul Autre bon</p>
-              <GaugeNumber value={fmtMontant(cumulAutreBon, devise)} />
-            </div>
-          </div>
-        )}
-
-        {cumulBonsParGerant.length > 0 && (
-          <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
-            <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Cumul par gérant</p>
-            <div className="flex flex-col gap-1.5">
-              {cumulBonsParGerant.map(([nom, montant]) => (
-                <div key={nom} className="flex items-center justify-between text-xs">
-                  <span>{nom}</span>
-                  <span className="smi-mono font-semibold" style={{ color: C.text }}>{fmtMontant(montant, devise)}</span>
-                </div>
-              ))}
             </div>
           </div>
         )}
@@ -2933,10 +2788,9 @@ function BonsView({ db, setDb, profile }) {
                           )}
                           <div className="flex-1 min-w-0 text-xs" style={{ color: C.textMuted }}>
                             <span className="font-medium" style={{ color: C.text }}>{b.libelle}</span>{" "}
-                            <Pill tone={bonCategorie(b) === "groupe_transport_vidange" ? "teal" : bonCategorie(b) === "autre" ? "muted" : "amber"}>{bonCategorie(b) === "groupe_transport_vidange" ? "Groupe/Transport/Vidange" : bonCategorie(b) === "autre" ? "Autre bon" : "Citerne"}</Pill>
+                            <Pill tone={bonCategorie(b) === "groupe_transport_vidange" ? "teal" : "amber"}>{bonCategorie(b) === "groupe_transport_vidange" ? "Groupe/Transport/Vidange" : "Citerne"}</Pill>
                             {num(b.quantite) > 0 && <span> · {fmtVol(b.quantite)} × {fmtMontant(b.prixUnitaire, dv)}</span>}
                             {num(b.fraisRoute) > 0 && <span> · Frais : {fmtMontant(b.fraisRoute, dv)}</span>}
-                            {b.creePar && <span style={{ color: C.textFaint }}> · Saisi par : {b.creePar}</span>}
                           </div>
                           <span className="text-xs font-semibold smi-mono flex-shrink-0">{fmtMontant(bonTotal(b), dv)}</span>
                           <button onClick={() => startEdit(b)} className="smi-btn flex-shrink-0 smi-no-print" style={{ color: C.teal }}><Pencil size={13} /></button>
@@ -3306,13 +3160,13 @@ function InspectionView({ db, setDb, profile }) {
 /* ------------------------------- Dashboard view ----------------------------- */
 
 function DashboardView({ db }) {
-  const monthPrefix = todayISO().slice(0, 7);
-
   // useMemo évite de refaire tous ces calculs (potentiellement lourds sur plusieurs mois
   // de données) à chaque rendu déclenché par une saisie ailleurs dans l'app.
+  // Les cumuls couvrent tout l'historique de la station (pas seulement le mois en cours),
+  // pour servir de base directe aux rapports sans recalcul manuel à part.
   const rows = useMemo(() => db.stations.map((s) => {
     const dates = new Set([
-      ...db.releves.filter((r) => r.stationId === s.id && r.date.startsWith(monthPrefix)).map((r) => r.date),
+      ...db.releves.filter((r) => r.stationId === s.id).map((r) => r.date),
     ]);
     let vEssence = 0, vGasoil = 0, ca = 0;
     dates.forEach((d) => {
@@ -3323,7 +3177,13 @@ function DashboardView({ db }) {
     const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, lastCaisseDate) : null;
-    const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
+    const totalVersements = db.versements.filter((v) => v.stationId === s.id).reduce((a, v) => a + versementTotal(v), 0);
+
+    // Écart de caisse cumulé, recalculé depuis l'historique complet — sert de vérification
+    // indépendante de la « Caisse attendue » du dernier relevé (qui, elle, dépend d'une
+    // saisie manuelle « Caisse précédente » pouvant être oubliée ou erronée).
+    const ecartCaisse = ecartCaisseCumule(db, s.id);
+    const ecartCaisseIncoherent = caisse ? Math.abs(ecartCaisse - caisse.caisseAttendue) > 1000 : false;
 
     // Rythme de vente moyen sur les 7 derniers jours (essence + gasoil confondus) — sert
     // de base pour estimer combien de jours il reste avant une rupture de stock.
@@ -3353,8 +3213,8 @@ function DashboardView({ db }) {
       }
     }
 
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
-  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, monthPrefix]);
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, ecartCaisse, ecartCaisseIncoherent, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, db.bons]);
 
   const stationsEnAlerte = rows.filter((r) => r.statutStock === "alerte");
 
@@ -3362,7 +3222,7 @@ function DashboardView({ db }) {
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Tableau de bord</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Cumuls du mois en cours ({monthLabel(new Date().getMonth())}), station par station — mise à jour automatique à chaque saisie.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Cumuls sur toute la période enregistrée, station par station — mise à jour automatique à chaque saisie.</p>
       </div>
 
       {stationsEnAlerte.length > 0 && (
@@ -3387,11 +3247,19 @@ function DashboardView({ db }) {
                 <Pill tone="amber">{devise}</Pill>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Essence (mois)</p><GaugeNumber value={fmtVol(r.vEssence)} tone="amber" /></div>
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (mois)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Essence (cumul)</p><GaugeNumber value={fmtVol(r.vEssence)} tone="amber" /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (cumul)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
               </div>
-              <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (mois)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
-              <div><p className="text-xs" style={{ color: C.textFaint }}>Versements (mois)</p><GaugeNumber value={fmtMontant(r.totalVersements, devise)} tone="muted" /></div>
+              <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (cumul)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
+              <div><p className="text-xs" style={{ color: C.textFaint }}>Versements (cumul)</p><GaugeNumber value={fmtMontant(r.totalVersements, devise)} tone="muted" /></div>
+              <div className="rounded-md p-3" style={{ background: r.ecartCaisseIncoherent ? C.dangerSoft : C.amberSoft, border: `1px solid ${r.ecartCaisseIncoherent ? C.danger : C.amberDim}` }}>
+                <p className="text-xs uppercase font-semibold mb-1" style={{ color: r.ecartCaisseIncoherent ? C.danger : C.amber }}>Écart de caisse (non versé)</p>
+                <GaugeNumber value={fmtMontant(r.ecartCaisse, devise)} tone={r.ecartCaisseIncoherent ? "danger" : "amber"} />
+                <p className="text-[10px] mt-1" style={{ color: C.textFaint }}>Recalculé depuis tout l'historique ventes/bons/versements — montant théorique restant à verser à ce jour.</p>
+                {r.ecartCaisseIncoherent && (
+                  <p className="text-xs font-semibold mt-1.5 flex items-center gap-1" style={{ color: C.danger }}><AlertTriangle size={13} /> Ne correspond pas à la Caisse attendue du {fmtDateLong(r.caisseDate)} ({fmtMontant(r.caisse.caisseAttendue, devise)}) — vérifiez « Caisse précédente » sur ce relevé.</p>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
                 <div>
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
@@ -3766,21 +3634,6 @@ function PassationsView({ db, setDb, profile }) {
 
   const gerantsStation = (db.gerants || []).filter((g) => g.stationId === stationId);
 
-  // Index de clôture de chaque pompe de la station, au dernier relevé connu à la date de
-  // passation ou avant — ce que le gérant sortant laisse comme dernier compteur relevé.
-  const indexPompes = useMemo(() => {
-    return db.pompes.filter((p) => p.stationId === stationId).map((p) => {
-      const releve = db.releves.filter((r) => r.pompeId === p.id && r.date <= date).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
-      return {
-        pompeId: p.id, pompeNom: p.nom,
-        showEssence: pompeHas(p, "essence"), showGasoil: pompeHas(p, "gasoil"),
-        indexClotureEssence: releve?.indexClotureEssence ?? null,
-        indexClotureGasoil: releve?.indexClotureGasoil ?? null,
-        date: releve?.date || null,
-      };
-    });
-  }, [db.pompes, db.releves, stationId, date]);
-
   // Pré-remplit stock et caisse avec les derniers chiffres connus de la station à la date
   // choisie — l'admin n'a plus qu'à corriger si le comptage physique du jour diffère.
   const preremplir = () => {
@@ -3814,7 +3667,7 @@ function PassationsView({ db, setDb, profile }) {
     if (!gerantEntrant.trim()) { setErr("Indiquez le nom du gérant entrant."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.passations.find((p) => p.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId, date, gerantSortant: gerantSortant.trim(), gerantEntrant: gerantEntrant.trim(), stockEssence, stockGasoil, caisseMontant, observations: observations.trim(), indexPompes, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId, date, gerantSortant: gerantSortant.trim(), gerantEntrant: gerantEntrant.trim(), stockEssence, stockGasoil, caisseMontant, observations: observations.trim(), timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, passations: editingId ? db.passations.map((p) => (p.id === editingId ? row : p)) : [...db.passations, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId, entity: "passation", action: editingId ? "modification" : "création", after: { date, gerantSortant: row.gerantSortant, gerantEntrant: row.gerantEntrant } });
     setDb(next);
@@ -3860,42 +3713,11 @@ function PassationsView({ db, setDb, profile }) {
         <div className="flex justify-end mb-2">
           <Button variant="ghost" onClick={preremplir} disabled={!stationId}>Pré-remplir stock/caisse</Button>
         </div>
-        <p className="text-[10px] italic mb-2" style={{ color: C.textFaint }}>L'index de clôture par pompe se remplit automatiquement ci-dessous, sans bouton à cliquer.</p>
         <div className="grid sm:grid-cols-3 gap-3 mb-3">
           <Field label="Stock Essence (L)"><NumberInput value={stockEssence} onChange={(e) => setStockEssence(e.target.value)} /></Field>
           <Field label="Stock Gasoil (L)"><NumberInput value={stockGasoil} onChange={(e) => setStockGasoil(e.target.value)} /></Field>
           <Field label={`Caisse (${devise})`}><NumberInput value={caisseMontant} onChange={(e) => setCaisseMontant(e.target.value)} /></Field>
         </div>
-
-        {indexPompes.length > 0 && (
-          <div className="mb-3">
-            <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: C.textMuted }}>Index de clôture par pompe (gérant sortant)</p>
-            <div className="overflow-x-auto smi-scroll">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                    <th className="text-left py-1" style={{ color: C.textMuted }}>Pompe</th>
-                    <th className="text-right py-1" style={{ color: C.textMuted }}>Index Essence</th>
-                    <th className="text-right py-1" style={{ color: C.textMuted }}>Index Gasoil</th>
-                    <th className="text-left py-1" style={{ color: C.textMuted }}>Relevé du</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {indexPompes.map((ip) => (
-                    <tr key={ip.pompeId} style={{ borderBottom: `1px solid ${C.border}` }}>
-                      <td className="py-1">{ip.pompeNom}</td>
-                      <td className="py-1 text-right smi-mono">{ip.showEssence ? (ip.indexClotureEssence !== null ? ip.indexClotureEssence : "—") : "—"}</td>
-                      <td className="py-1 text-right smi-mono">{ip.showGasoil ? (ip.indexClotureGasoil !== null ? ip.indexClotureGasoil : "—") : "—"}</td>
-                      <td className="py-1" style={{ color: C.textFaint }}>{ip.date ? fmtDateLong(ip.date) : "Aucun relevé"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="text-[10px] italic mt-1" style={{ color: C.textFaint }}>Repris automatiquement du dernier Relevé Pompes à la date de passation ou avant — enregistré avec la fiche.</p>
-          </div>
-        )}
-
         <Field label="Observations (état des équipements, remarques...)">
           <textarea className="smi-input w-full rounded-md px-3 py-2 text-sm" rows={3} style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={observations} onChange={(e) => setObservations(e.target.value)} placeholder="ex : Pompe 2 en panne, réparation prévue le..." />
         </Field>
@@ -3944,7 +3766,7 @@ function PassationsView({ db, setDb, profile }) {
         if (!p) return null;
         const st = db.stations.find((s) => s.id === p.stationId);
         return (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={() => setPrintingId(null)}>
+          <div className="smi-no-print" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={() => setPrintingId(null)}>
             <div onClick={(e) => e.stopPropagation()} className="rounded-lg p-5 w-full max-w-lg smi-print-area" style={{ background: C.panel, border: `1px solid ${C.border}`, maxHeight: "85vh", overflowY: "auto" }}>
               <div className="flex items-center justify-between mb-4 smi-no-print">
                 <p className="smi-display text-xl">Fiche de passation</p>
@@ -3956,7 +3778,7 @@ function PassationsView({ db, setDb, profile }) {
               <div className="hidden smi-print-only mb-4">
                 <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Fiche de passation</h1>
               </div>
-              <div className="flex flex-col gap-3 text-base">
+              <div className="flex flex-col gap-2 text-sm">
                 <p><span style={{ color: C.textFaint }}>Station :</span> <span className="font-semibold">{st?.nom}</span></p>
                 <p><span style={{ color: C.textFaint }}>Date :</span> {fmtDateLong(p.date)}</p>
                 <p><span style={{ color: C.textFaint }}>Gérant sortant :</span> {p.gerantSortant || "—"}</p>
@@ -3975,48 +3797,19 @@ function PassationsView({ db, setDb, profile }) {
                     <p className="font-semibold smi-mono">{fmtMontant(p.caisseMontant || 0, st?.devise || "GNF")}</p>
                   </div>
                 </div>
-                {p.indexPompes && p.indexPompes.length > 0 && (
-                  <div className="mt-2">
-                    <p className="text-xs mb-1" style={{ color: C.textFaint }}>Index de clôture par pompe (gérant sortant)</p>
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                          <th className="text-left py-1" style={{ color: C.textMuted }}>Pompe</th>
-                          <th className="text-right py-1" style={{ color: C.textMuted }}>Index Essence</th>
-                          <th className="text-right py-1" style={{ color: C.textMuted }}>Index Gasoil</th>
-                          <th className="text-left py-1" style={{ color: C.textMuted }}>Relevé du</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {p.indexPompes.map((ip) => (
-                          <tr key={ip.pompeId} style={{ borderBottom: `1px solid ${C.border}` }}>
-                            <td className="py-1">{ip.pompeNom}</td>
-                            <td className="py-1 text-right smi-mono">{ip.showEssence ? (ip.indexClotureEssence !== null ? ip.indexClotureEssence : "—") : "—"}</td>
-                            <td className="py-1 text-right smi-mono">{ip.showGasoil ? (ip.indexClotureGasoil !== null ? ip.indexClotureGasoil : "—") : "—"}</td>
-                            <td className="py-1" style={{ color: C.textFaint }}>{ip.date ? fmtDateLong(ip.date) : "Aucun relevé"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
                 {p.observations && (
                   <div className="mt-2">
                     <p className="text-xs" style={{ color: C.textFaint }}>Observations</p>
                     <p>{p.observations}</p>
                   </div>
                 )}
-                <div className="grid grid-cols-3 gap-6 mt-8">
+                <div className="grid grid-cols-2 gap-6 mt-8">
                   <div>
                     <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Gérant sortant</p>
                     <div style={{ borderTop: `1px solid ${C.border}` }} />
                   </div>
                   <div>
                     <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Gérant entrant</p>
-                    <div style={{ borderTop: `1px solid ${C.border}` }} />
-                  </div>
-                  <div>
-                    <p className="text-xs mb-8" style={{ color: C.textFaint }}>Signature — Chef Réseau</p>
                     <div style={{ borderTop: `1px solid ${C.border}` }} />
                   </div>
                 </div>
@@ -4091,9 +3884,6 @@ function RapportHebdomadaireView({ db, profile }) {
   }), { bancaire: 0, marchand: 0, dg: 0, total: 0, venteEssence: 0, venteGasoil: 0, ca: 0 });
 
   const totalBons = bonsSemaine.reduce((a, b) => a + bonTotal(b), 0);
-  const totalBonsCiterne = bonsSemaine.filter((b) => bonCategorie(b) === "citerne").reduce((a, b) => a + bonTotal(b), 0);
-  const totalBonsGroupeTransport = bonsSemaine.filter((b) => bonCategorie(b) === "groupe_transport_vidange").reduce((a, b) => a + bonTotal(b), 0);
-  const totalBonsAutre = bonsSemaine.filter((b) => bonCategorie(b) === "autre").reduce((a, b) => a + bonTotal(b), 0);
 
   // Stock d'ouverture de la semaine : premier contrôle de stock enregistré à partir du
   // lundi (à défaut, le plus récent avant cette date — donc la clôture du vendredi
@@ -4247,18 +4037,6 @@ function RapportHebdomadaireView({ db, profile }) {
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: `2px solid ${C.border}` }}>
-                  <td colSpan={3} className="py-1.5">Dont Citerne</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtMontant(totalBonsCiterne, devise)}</td>
-                </tr>
-                <tr>
-                  <td colSpan={3} className="py-1.5">Dont Groupe/Transport/Vidange</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtMontant(totalBonsGroupeTransport, devise)}</td>
-                </tr>
-                <tr>
-                  <td colSpan={3} className="py-1.5">Dont Autre bon</td>
-                  <td className="py-1.5 text-right smi-mono">{fmtMontant(totalBonsAutre, devise)}</td>
-                </tr>
-                <tr style={{ borderTop: `1px solid ${C.border}` }}>
                   <td colSpan={3} className="py-2 font-bold">Total Bons semaine</td>
                   <td className="py-2 text-right smi-mono font-bold">{fmtMontant(totalBons, devise)}</td>
                 </tr>
@@ -5003,7 +4781,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stock", title: "Contrôle Stock", adminOnly: false,
-    text: "Le stock d'ouverture du jour reprend automatiquement le stock PHYSIQUE constaté la veille (pas le stock théorique) — pour que le comptage réel serve de référence d'un jour sur l'autre. Le comptage physique du jour, lui, part TOUJOURS vide : il doit être saisi chaque jour par un vrai jaugeage de la cuve, jamais repris automatiquement — sinon l'écart affiché ne refléterait plus un vrai contrôle physique. Il devient à son tour le stock d'ouverture du lendemain une fois saisi. L'écart entre stock théorique calculé et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
+    text: "Le stock d'ouverture du jour reprend automatiquement le stock PHYSIQUE constaté la veille (pas le stock théorique) — pour que le comptage réel serve de référence d'un jour sur l'autre. Le comptage physique du jour est pré-rempli avec ce même point de départ ; corrigez-le selon le comptage réel une fois les livraisons et ventes prises en compte, puisqu'il deviendra à son tour le stock d'ouverture du lendemain. L'écart entre stock théorique calculé et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
   },
   {
     key: "caisse", title: "Caisse", adminOnly: false,
@@ -5035,7 +4813,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
-    text: "Vue d'ensemble du réseau : volumes et chiffre d'affaires du mois en cours, station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture — avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
+    text: "Vue d'ensemble du réseau : volumes, chiffre d'affaires et versements cumulés sur toute la période enregistrée (pas seulement le mois en cours), station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi un « Écart de caisse (non versé) » recalculé depuis tout l'historique ventes/bons/versements — avec une alerte si ce montant ne correspond pas à la Caisse attendue du dernier relevé, signe d'une erreur de saisie sur « Caisse précédente » — et son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture, avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
   },
   {
     key: "commandes_reseau", title: "Commandes", adminOnly: true,
@@ -5047,7 +4825,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "passations", title: "Passation", adminOnly: true,
-    text: "Enregistre chaque changement de gérant dans une station : qui remplace qui, à quelle date, et dans quel état (stock essence/gasoil, caisse, et index de clôture de chaque pompe — repris automatiquement du dernier Relevé Pompes) la station a été transmise. Un bouton « Pré-remplir stock/caisse » reprend les derniers chiffres connus. Chaque passation peut être imprimée en pleine page avec lignes de signature pour le gérant sortant, le gérant entrant, et le Chef Réseau.",
+    text: "Enregistre chaque changement de gérant dans une station : qui remplace qui, à quelle date, et dans quel état (stock essence/gasoil, caisse) la station a été transmise, avec un bouton « Pré-remplir stock/caisse » qui reprend les derniers chiffres connus. Chaque passation peut être imprimée sous forme de fiche avec lignes de signature pour le gérant sortant et le gérant entrant.",
   },
   {
     key: "partenaires", title: "Partenaires", adminOnly: false,
