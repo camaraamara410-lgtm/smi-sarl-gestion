@@ -428,25 +428,78 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
 }
 
 // Écart de caisse cumulé d'une station : montant théorique actuellement en caisse / non
-// encore versé, recalculé directement depuis l'historique complet des ventes, bons et
-// versements de la station — sans dépendre de la saisie manuelle jour par jour de
-// « Caisse précédente » dans l'onglet Caisse (ce report manuel peut être oublié ou mal
-// renseigné, ex. après un versement partiel d'un solde accumulé sur plusieurs jours).
-// C'est l'équivalent du « Solde caisse théorique cumulé » d'un suivi Excel classique :
-// Σ(CA de tous les jours) − Σ(tous les Bons) − Σ(tous les Versements, y compris paiement
-// marchand) − Σ(paiement marchand saisi manuellement dans Caisse, ancienne saisie).
+// encore versé, recalculé directement depuis l'historique des ventes, bons et versements
+// de la station — sans dépendre de la saisie manuelle jour par jour de « Caisse précédente »
+// dans l'onglet Caisse (ce report manuel peut être oublié ou mal renseigné, ex. après un
+// versement partiel d'un solde accumulé sur plusieurs jours).
+// C'est l'équivalent du « Solde caisse théorique cumulé » d'un suivi Excel classique — qui
+// démarre lui aussi d'une ligne de départ (stock/caisse vérifié), pas du tout premier jour
+// d'exploitation de la station. Si une « Caisse de référence » (avec sa date) est définie
+// pour la station (onglet Stations), seuls les mouvements postérieurs à cette date sont
+// additionnés à ce solde de départ ; sinon, par défaut, tout l'historique est utilisé (une
+// station sans référence définie ni la moindre saisie ancienne donne le même résultat).
 function ecartCaisseCumule(db, stationId) {
+  const station = (db.stations || []).find((s) => s.id === stationId);
+  const refDate = station?.caisseReferenceDate || null;
+  const refMontant = num(station?.caisseReference);
+
   const dates = new Set();
-  (db.releves || []).forEach((r) => { if (r.stationId === stationId) dates.add(r.date); });
-  (db.ventes || []).forEach((v) => { if (v.stationId === stationId) dates.add(v.date); });
+  (db.releves || []).forEach((r) => { if (r.stationId === stationId && (!refDate || r.date > refDate)) dates.add(r.date); });
+  (db.ventes || []).forEach((v) => { if (v.stationId === stationId && (!refDate || v.date > refDate)) dates.add(v.date); });
   let ca = 0;
   dates.forEach((date) => { ca += computeVente(db.releves, db.ventes, stationId, date).ca; });
-  const bonsStation = (db.bons || []).filter((b) => b.stationId === stationId);
-  const versementsStation = (db.versements || []).filter((v) => v.stationId === stationId);
+
+  const bonsStation = (db.bons || []).filter((b) => b.stationId === stationId && (!refDate || b.date > refDate));
+  const versementsStation = (db.versements || []).filter((v) => v.stationId === stationId && (!refDate || v.date > refDate));
   const totalBon = sumBons(bonsStation);
   const totalVersement = sumVersements(versementsStation);
-  const totalPaiementMarchandManuel = (db.caisses || []).filter((c) => c.stationId === stationId).reduce((a, c) => a + num(c.totalPaiementMarchand), 0);
-  return ca - totalBon - totalVersement - totalPaiementMarchandManuel;
+  const totalPaiementMarchandManuel = (db.caisses || []).filter((c) => c.stationId === stationId && (!refDate || c.date > refDate)).reduce((a, c) => a + num(c.totalPaiementMarchand), 0);
+  return refMontant + ca - totalBon - totalVersement - totalPaiementMarchandManuel;
+}
+
+// Écart de stock cumulé (essence/gasoil) d'une station : stock théorique recalculé depuis
+// la toute première saisie Stock de la station — stock de départ (stockOuverture de cette
+// première ligne) + toutes les réceptions/livraisons enregistrées depuis, moins tout le
+// carburant distribué aux pompes. Ce dernier point se calcule pompe par pompe comme l'index
+// de clôture le plus récent moins l'index d'ouverture de la toute première saisie de cette
+// pompe — une simple différence d'index cumulée, qui ne nécessite pas un relevé quotidien
+// ininterrompu (contrairement à une somme jour par jour, fragile au moindre jour manqué).
+// Comparé au dernier stock physique jaugé, ça donne un écart de stock (manquant/surplus en
+// cuve) fiable même avec des trous dans les saisies — l'équivalent, pour le carburant, de
+// l'Écart de caisse cumulé ci-dessus.
+function ecartStockCumule(db, stationId) {
+  const stocksStation = (db.stocks || []).filter((s) => s.stationId === stationId).sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (stocksStation.length === 0) return null;
+  const premier = stocksStation[0];
+  const dernier = stocksStation[stocksStation.length - 1];
+  const stockDepartEssence = num(premier.stockOuvertureEssence);
+  const stockDepartGasoil = num(premier.stockOuvertureGasoil);
+  const receptionsEssence = stocksStation.reduce((a, s) => a + num(s.livraisonEssence), 0);
+  const receptionsGasoil = stocksStation.reduce((a, s) => a + num(s.livraisonGasoil), 0);
+
+  let venduEssence = 0, venduGasoil = 0;
+  const pompesStation = (db.pompes || []).filter((p) => p.stationId === stationId);
+  pompesStation.forEach((p) => {
+    const relevesP = (db.releves || []).filter((r) => r.stationId === stationId && r.pompeId === p.id).sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (relevesP.length === 0) return;
+    const first = relevesP[0], last = relevesP[relevesP.length - 1];
+    venduEssence += Math.max(0, num(last.indexClotureEssence) - num(first.indexOuvertureEssence));
+    venduGasoil += Math.max(0, num(last.indexClotureGasoil) - num(first.indexOuvertureGasoil));
+  });
+
+  const stockTheoriqueEssence = stockDepartEssence + receptionsEssence - venduEssence;
+  const stockTheoriqueGasoil = stockDepartGasoil + receptionsGasoil - venduGasoil;
+  const dernierCompute = computeStock(db.releves, db.stocks, stationId, dernier.date);
+  const stockPhysiqueEssence = stockAffichable(dernierCompute, "essence");
+  const stockPhysiqueGasoil = stockAffichable(dernierCompute, "gasoil");
+  return {
+    dateDepart: premier.date,
+    dateActuelle: dernier.date,
+    stockTheoriqueEssence, stockTheoriqueGasoil,
+    stockPhysiqueEssence, stockPhysiqueGasoil,
+    ecartEssence: stockPhysiqueEssence !== null && stockPhysiqueEssence !== undefined ? stockPhysiqueEssence - stockTheoriqueEssence : null,
+    ecartGasoil: stockPhysiqueGasoil !== null && stockPhysiqueGasoil !== undefined ? stockPhysiqueGasoil - stockTheoriqueGasoil : null,
+  };
 }
 
 /* --------------------------- Persistence hook -------------------------- */
@@ -1031,6 +1084,12 @@ function StationsView({ db, setDb, profile }) {
             <Field label="Devise"><TextInput value={form.devise ?? "GNF"} onChange={(e) => setForm({ ...form, devise: e.target.value })} /></Field>
             <Field label="Fond de roulement (L)" hint="Seuil minimum de stock total (essence + gasoil) à maintenir — sert à alerter avant une rupture.">
               <NumberInput value={form.fondRoulement ?? ""} onChange={(e) => setForm({ ...form, fondRoulement: e.target.value })} />
+            </Field>
+            <Field label="Caisse de référence (GNF)" hint="Solde de caisse vérifié (comptage physique ou audit) à la date ci-dessous. Sert de point de départ à l'Écart de caisse cumulé du Tableau de bord — comme la ligne de départ d'un tableau de suivi Excel — au lieu de tout recalculer depuis la toute première saisie de l'app.">
+              <NumberInput value={form.caisseReference ?? ""} onChange={(e) => setForm({ ...form, caisseReference: e.target.value })} />
+            </Field>
+            <Field label="Date de cette caisse de référence" hint="Seuls les mouvements (ventes, bons, versements) postérieurs à cette date sont ajoutés au calcul.">
+              <TextInput type="date" value={form.caisseReferenceDate || ""} onChange={(e) => setForm({ ...form, caisseReferenceDate: e.target.value })} max={todayISO()} />
             </Field>
             <Field label="Couleur de la station" hint="Pour la repérer facilement sur ses cartes dans l'application.">
               <div className="flex gap-2 flex-wrap items-center">
@@ -3184,6 +3243,7 @@ function DashboardView({ db }) {
     // saisie manuelle « Caisse précédente » pouvant être oubliée ou erronée).
     const ecartCaisse = ecartCaisseCumule(db, s.id);
     const ecartCaisseIncoherent = caisse ? Math.abs(ecartCaisse - caisse.caisseAttendue) > 1000 : false;
+    const ecartStock = ecartStockCumule(db, s.id);
 
     // Rythme de vente moyen sur les 7 derniers jours (essence + gasoil confondus) — sert
     // de base pour estimer combien de jours il reste avant une rupture de stock.
@@ -3213,8 +3273,8 @@ function DashboardView({ db }) {
       }
     }
 
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, ecartCaisse, ecartCaisseIncoherent, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
-  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, db.bons]);
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, ecartCaisse, ecartCaisseIncoherent, ecartStock, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, db.bons, db.pompes]);
 
   const stationsEnAlerte = rows.filter((r) => r.statutStock === "alerte");
 
@@ -3255,11 +3315,27 @@ function DashboardView({ db }) {
               <div className="rounded-md p-3" style={{ background: r.ecartCaisseIncoherent ? C.dangerSoft : C.amberSoft, border: `1px solid ${r.ecartCaisseIncoherent ? C.danger : C.amberDim}` }}>
                 <p className="text-xs uppercase font-semibold mb-1" style={{ color: r.ecartCaisseIncoherent ? C.danger : C.amber }}>Écart de caisse (non versé)</p>
                 <GaugeNumber value={fmtMontant(r.ecartCaisse, devise)} tone={r.ecartCaisseIncoherent ? "danger" : "amber"} />
-                <p className="text-[10px] mt-1" style={{ color: C.textFaint }}>Recalculé depuis tout l'historique ventes/bons/versements — montant théorique restant à verser à ce jour.</p>
+                <p className="text-[10px] mt-1" style={{ color: C.textFaint }}>{r.station.caisseReferenceDate ? `Depuis la caisse de référence du ${fmtDateLong(r.station.caisseReferenceDate)}` : "Depuis toute la saisie de la station (aucune caisse de référence définie)"} — montant théorique restant à verser à ce jour.</p>
                 {r.ecartCaisseIncoherent && (
                   <p className="text-xs font-semibold mt-1.5 flex items-center gap-1" style={{ color: C.danger }}><AlertTriangle size={13} /> Ne correspond pas à la Caisse attendue du {fmtDateLong(r.caisseDate)} ({fmtMontant(r.caisse.caisseAttendue, devise)}) — vérifiez « Caisse précédente » sur ce relevé.</p>
                 )}
               </div>
+              {r.ecartStock && (
+                <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 40%, transparent)` }}>
+                  <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: C.teal }}>Écart de stock cuve (cumulé depuis {fmtDateLong(r.ecartStock.dateDepart)})</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.textFaint }}>Essence</p>
+                      <GaugeNumber value={r.ecartStock.ecartEssence !== null ? `${r.ecartStock.ecartEssence >= 0 ? "+" : ""}${fmtVol(r.ecartStock.ecartEssence)}` : "—"} tone={r.ecartStock.ecartEssence !== null && r.ecartStock.ecartEssence < 0 ? "danger" : "amber"} />
+                    </div>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.textFaint }}>Gasoil</p>
+                      <GaugeNumber value={r.ecartStock.ecartGasoil !== null ? `${r.ecartStock.ecartGasoil >= 0 ? "+" : ""}${fmtVol(r.ecartStock.ecartGasoil)}` : "—"} tone={r.ecartStock.ecartGasoil !== null && r.ecartStock.ecartGasoil < 0 ? "danger" : "teal"} />
+                    </div>
+                  </div>
+                  <p className="text-[10px] mt-1.5" style={{ color: C.textFaint }}>Stock physique jaugé au {fmtDateLong(r.ecartStock.dateActuelle)} moins stock théorique (stock de départ + réceptions − volumes pompés depuis le premier relevé). Négatif = manquant en cuve.</p>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
                 <div>
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
@@ -4813,7 +4889,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
-    text: "Vue d'ensemble du réseau : volumes, chiffre d'affaires et versements cumulés sur toute la période enregistrée (pas seulement le mois en cours), station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi un « Écart de caisse (non versé) » recalculé depuis tout l'historique ventes/bons/versements — avec une alerte si ce montant ne correspond pas à la Caisse attendue du dernier relevé, signe d'une erreur de saisie sur « Caisse précédente » — et son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture, avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
+    text: "Vue d'ensemble du réseau : volumes, chiffre d'affaires et versements cumulés sur toute la période enregistrée (pas seulement le mois en cours), station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi un « Écart de caisse (non versé) » recalculé depuis tout l'historique ventes/bons/versements — avec une alerte si ce montant ne correspond pas à la Caisse attendue du dernier relevé, signe d'une erreur de saisie sur « Caisse précédente » — ainsi qu'un « Écart de stock cuve » (essence et gasoil séparément), recalculé depuis le stock de départ de la toute première saisie Stock, plus toutes les réceptions, moins tout le carburant pompé (index de clôture le plus récent moins index d'ouverture du tout premier relevé de chaque pompe), comparé au dernier stock physique jaugé — un négatif signale un manquant en cuve. Chaque station affiche enfin son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture, avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
   },
   {
     key: "commandes_reseau", title: "Commandes", adminOnly: true,
@@ -4821,7 +4897,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
-    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
+    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. La « Caisse de référence » (montant + date) sert de point de départ vérifié à l'Écart de caisse cumulé du Tableau de bord — renseignez-y un solde de caisse compté/audité et sa date à chaque fois que vous voulez repartir d'une base sûre (comme la première ligne d'un tableau de suivi Excel), au lieu de laisser l'app recalculer depuis toute la saisie de la station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
   },
   {
     key: "passations", title: "Passation", adminOnly: true,
