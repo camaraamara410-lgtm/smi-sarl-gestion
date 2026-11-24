@@ -1,71 +1,42 @@
-import { MongoClient } from "mongodb";
+import { cols, loadTenant, keyFor, verifySession, bearer, readJsonBody, ADMIN_PIN_KEY } from "./_lib.js";
 
-// Fonction serverless Vercel : proxy sécurisé entre le site (navigateur) et MongoDB Atlas.
-// La chaîne de connexion (MONGODB_URI) contient un mot de passe — elle ne doit JAMAIS être
-// exposée au navigateur. En la lisant ici (côté serveur, sans préfixe VITE_), elle reste
-// secrète : seul ce fichier, exécuté sur les serveurs de Vercel, y a accès.
-//
-// Le client web (src/storage.js) appelle cette fonction via /api/kv au lieu de parler à
-// MongoDB directement.
-//
-// Protection par jeton d'application (APP_TOKEN) : sans ce jeton dans l'en-tête de chaque
-// requête, l'API refuse de répondre. Ça bloque tout robot ou visiteur qui tomberait
-// simplement sur l'adresse de l'API sans jamais avoir chargé l'application elle-même.
-// Honnêteté sur la limite : ce jeton est inclus dans le code JavaScript envoyé au
-// navigateur (nécessaire pour que l'app puisse l'utiliser) — une personne qui inspecte
-// délibérément ce code peut donc le retrouver. Ce n'est pas une authentification
-// utilisateur réelle, mais ça relève sérieusement la barrière par rapport à une API
-// totalement ouverte, et bloque l'immense majorité des accès non désirés.
-
-const DB_NAME = "smi_gestion";
-const COLLECTION = "smi_kv";
-
-let clientPromise = null;
-function getClient() {
-  if (!clientPromise) {
-    const uri = process.env.MONGODB_URI;
-    if (!uri) throw new Error("MONGODB_URI n'est pas configuré sur le serveur.");
-    clientPromise = new MongoClient(uri).connect();
-  }
-  return clientPromise;
-}
+// Fonction serveur : lecture / écriture des données d'UNE société.
+// Chaque appel doit porter la session délivrée par /api/login. Le serveur en déduit la
+// société et préfixe lui-même la clé : impossible d'atteindre les données d'une autre
+// société, même en modifiant l'application dans le navigateur.
+// La chaîne MONGODB_URI reste côté serveur (jamais envoyée au navigateur).
 
 export default async function handler(req, res) {
-  const expectedToken = process.env.APP_TOKEN;
-  if (expectedToken) {
-    const provided = req.headers["x-app-token"];
-    if (provided !== expectedToken) {
-      return res.status(401).json({ error: "Non autorisé." });
-    }
-  }
-  // Si APP_TOKEN n'est pas configuré côté serveur, l'API reste ouverte (comportement
-  // précédent) — ça évite de casser l'application si la variable n'a pas encore été
-  // ajoutée, mais la protection ne s'active réellement qu'une fois APP_TOKEN défini
-  // sur Vercel (voir README).
-
   try {
-    const client = await getClient();
-    const col = client.db(DB_NAME).collection(COLLECTION);
+    const session = verifySession(bearer(req));
+    if (!session) return res.status(401).json({ error: "Session expirée. Reconnectez-vous." });
+
+    const { kv, tenants } = await cols();
+    const { tenant, error, status } = await loadTenant(tenants, session.t);
+    if (error) return res.status(status === 404 ? 401 : status).json({ error });
+
+    const body = req.method === "POST" ? readJsonBody(req) : {};
+    const key = req.method === "POST" ? body.key : req.query.key;
+    if (!key || typeof key !== "string") return res.status(400).json({ error: "key manquant" });
+    if (key.startsWith("__")) return res.status(403).json({ error: "Clé réservée." });
+    if (key === ADMIN_PIN_KEY && session.role !== "admin") return res.status(403).json({ error: "Réservé à l'administrateur." });
+
+    const id = keyFor(tenant, key);
 
     if (req.method === "GET") {
-      const key = req.query.key;
-      if (!key) return res.status(400).json({ error: "key manquant" });
-      const doc = await col.findOne({ _id: key });
+      const doc = await kv.findOne({ _id: id });
       if (!doc) return res.status(404).json({ error: "not found" });
       return res.status(200).json({ key, value: doc.value });
     }
 
     if (req.method === "POST") {
-      const { key, value } = req.body || {};
-      if (!key) return res.status(400).json({ error: "key manquant" });
-      await col.updateOne({ _id: key }, { $set: { value, updatedAt: new Date().toISOString() } }, { upsert: true });
-      return res.status(200).json({ key, value });
+      await kv.updateOne({ _id: id }, { $set: { value: body.value, updatedAt: new Date().toISOString(), updatedBy: session.name || null } }, { upsert: true });
+      return res.status(200).json({ key, value: body.value });
     }
 
     if (req.method === "DELETE") {
-      const key = req.query.key;
-      if (!key) return res.status(400).json({ error: "key manquant" });
-      await col.deleteOne({ _id: key });
+      if (session.role !== "admin") return res.status(403).json({ error: "Réservé à l'administrateur." });
+      await kv.deleteOne({ _id: id });
       return res.status(200).json({ key, deleted: true });
     }
 

@@ -3,13 +3,13 @@ import {
   Fuel, Gauge, Warehouse, Wallet, LayoutDashboard, CalendarRange,
   Building2, Settings2, LogOut, Plus, Trash2, Pencil, AlertTriangle,
   CheckCircle2, X, Loader2, ChevronRight, MapPin, Droplet, Lock, Download, History,
-  ClipboardCheck, Printer, ChevronDown, Truck, Camera, BookOpen, Landmark, Users
+  ClipboardCheck, Printer, ChevronDown, Truck, Camera, BookOpen, Landmark, Users, Upload
 } from "lucide-react";
-import { storage, isStorageDegraded, hasLocalStorage } from "./storage.js";
+import { storage, isStorageDegraded, hasLocalStorage, getSession, setSession, login } from "./storage.js";
 import QRCode from "qrcode";
 
 /* =========================================================================
-   SMI SARL — Gestion quotidienne du réseau de stations-service
+   Gestion StationPro — gestion quotidienne de réseaux de stations-service (multi-sociétés)
    Design : tableau de bord "poste de contrôle" — fond pétrole sombre,
    lectures façon compteur de pompe (chiffres ambrés tabulaires),
    essence = ambre, gasoil = sarcelle. Extensible par construction :
@@ -209,14 +209,20 @@ function DisplaySettingsPanel({ onClose }) {
 }
 
 /* ---------------------------- Logo (mark) -------------------------------
-   Main tendue orange sur cercle bleu — identité SMI SARL. */
+   Pompe à carburant blanche sur fond bleu — identité Gestion StationPro. */
 function Logo({ size = 28 }) {
-  // Icône officielle de marque (fournie par l'utilisateur), utilisée à l'identique
-  // dans l'app, comme favicon et comme icône installable — cohérence totale.
+  // Même icône que le favicon et l'icône installable.
   return <img src="/icon-192.png" width={size} height={size} alt="" aria-hidden="true" style={{ borderRadius: size * 0.22, display: "block" }} />;
 }
 
 /* ---------------------------- Helpers -------------------------------- */
+
+// Nom commercial de l'application, et nom de la société connectée (affiché dans l'en-tête
+// et sur les rapports imprimés).
+const APP_NAME = "Gestion StationPro";
+let NOM_SOCIETE = "";
+function setNomSociete(n) { NOM_SOCIETE = n || ""; }
+function nomSociete() { return NOM_SOCIETE || APP_NAME; }
 
 const uid = () => (crypto?.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + "-" + Math.random().toString(16).slice(2));
 
@@ -386,6 +392,62 @@ function stockAffichable(s, produit) {
   return phys !== null && phys !== undefined ? phys : close;
 }
 
+/* --------------------------- Cuves : niveau et alertes --------------------------- */
+
+const PRODUITS = [{ k: "essence", label: "Essence", tone: "amber" }, { k: "gasoil", label: "Gasoil", tone: "teal" }];
+
+// État des cuves d'une station : niveau estimé, remplissage, place libre, jours restants
+// et statut (bon / alerte / critique). Le niveau vient du dernier contrôle de stock
+// (stock physique jaugé s'il existe, sinon stock théorique). Quand plusieurs cuves
+// contiennent le même produit, le stock du produit est réparti au prorata des capacités.
+function etatCuvesStation(db, stationId) {
+  const cuves = (db.cuves || []).filter((c) => c.stationId === stationId);
+  const lastDate = db.stocks.filter((x) => x.stationId === stationId).map((x) => x.date).sort().pop() || null;
+  const stock = lastDate ? computeStock(db.releves, db.stocks, stationId, lastDate) : null;
+  // Rythme de vente : moyenne des 7 jours qui précèdent le dernier contrôle.
+  const rythme = { essence: 0, gasoil: 0 };
+  if (lastDate) {
+    const base = new Date(`${lastDate}T00:00:00`);
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(base); d.setDate(d.getDate() - i);
+      const v = sumReleve(db.releves, stationId, d.toISOString().slice(0, 10));
+      rythme.essence += v.essence / 7; rythme.gasoil += v.gasoil / 7;
+    }
+  }
+  const capTotale = { essence: 0, gasoil: 0 };
+  cuves.forEach((c) => { capTotale[c.produit] = (capTotale[c.produit] || 0) + num(c.capacite); });
+  const liste = cuves.map((c) => {
+    const cap = num(c.capacite);
+    const niveauProduit = stock ? stockAffichable(stock, c.produit) : null;
+    const part = capTotale[c.produit] > 0 ? cap / capTotale[c.produit] : 0;
+    const niveau = niveauProduit === null ? null : Math.max(0, niveauProduit * part);
+    const pct = niveau !== null && cap > 0 ? Math.min(100, Math.round((niveau / cap) * 100)) : null;
+    const alerte = num(c.seuilAlerte) || Math.round(cap * 0.25);
+    const critique = num(c.seuilCritique) || Math.round(cap * 0.1);
+    const statut = niveau === null ? "inconnu" : niveau <= critique ? "critique" : niveau <= alerte ? "alerte" : "bon";
+    const r = rythme[c.produit] * part;
+    const joursRestants = niveau !== null && r > 0 ? niveau / r : null;
+    const ecart = stock ? (c.produit === "essence" ? stock.ecartEssence : stock.ecartGasoil) : null;
+    return { cuve: c, cap, niveau, pct, alerte, critique, statut, placeLibre: niveau !== null ? Math.max(0, cap - niveau) : null, rythme: r, joursRestants, ecart: ecart === null ? null : ecart * part };
+  });
+  return { liste, lastDate };
+}
+
+// Place libre totale pour un produit dans une station (utile avant une livraison).
+function placeLibreProduit(db, stationId, produit) {
+  const { liste } = etatCuvesStation(db, stationId);
+  const l = liste.filter((x) => x.cuve.produit === produit);
+  if (!l.length || l.some((x) => x.placeLibre === null)) return null;
+  return l.reduce((a, x) => a + x.placeLibre, 0);
+}
+
+const STATUT_CUVE = {
+  bon: { label: "Bon", tone: "success" },
+  alerte: { label: "Alerte", tone: "amber" },
+  critique: { label: "Critique", tone: "danger" },
+  inconnu: { label: "Pas de contrôle", tone: "muted" },
+};
+
 function sumBons(bons) {
   return (bons || []).reduce((a, b) => a + num(b.quantite) * num(b.prixUnitaire) + num(b.fraisRoute), 0);
 }
@@ -393,7 +455,7 @@ function sumVersements(versements) {
   return (versements || []).reduce((a, v) => a + num(v.banqueMontant) + num(v.paiementMarchandMontant) + num(v.autreMontant), 0);
 }
 
-function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stationId, date) {
+function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stationId, date, depensesColl = [], reglementsColl = []) {
   const c = findCaisse(caisses, stationId, date) || {};
   const ca = computeVente(releves, ventes, stationId, date).ca;
   const caissePrecedente = num(c.caissePrecedente);
@@ -415,7 +477,11 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
   // versée avant la fin de journée, par exemple) — cet argent sort donc réellement du
   // tiroir le jour même. Le versement du jour se déduit désormais de la caisse attendue,
   // au même titre que le Bon et le Paiement marchand.
-  let caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand - totalVersement;
+  // Dépenses payées en espèces depuis la caisse de la station (hors dépenses refusées).
+  const totalDepenses = (depensesColl || []).filter((d) => d.stationId === stationId && d.date === date && d.payeeParCaisse && d.statut !== "refusee").reduce((a, d) => a + num(d.montant), 0);
+  // Règlements de clients à crédit reçus en espèces à la station : ils entrent dans la caisse.
+  const totalEncaissements = (reglementsColl || []).filter((r) => r.stationId === stationId && r.date === date && r.encaisseEnCaisse).reduce((a, r) => a + num(r.montant), 0);
+  let caisseAttendue = caissePrecedente + ca - totalBon - totalPaiementMarchand - totalVersement - totalDepenses + totalEncaissements;
   // Cas normal, pas une erreur : la caisse peut rester plusieurs jours sans être versée
   // (2, 3, 4 jours...), puis être versée en une seule fois — ce versement dépasse alors
   // forcément le CA d'un seul jour. Dans ce cas, on ne peut plus dire ce qu'il reste
@@ -424,108 +490,14 @@ function computeCaisse(releves, ventes, caisses, bonsColl, versementsColl, stati
   if (caisseAttendue < 0) caisseAttendue = ca;
   const caisseDuJour = c.caisseDuJour === undefined || c.caisseDuJour === "" ? null : num(c.caisseDuJour);
   const ecart = caisseDuJour === null ? null : caisseDuJour - caisseAttendue;
-  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, caisseAttendue, caisseDuJour, ecart, bons, versements };
-}
-
-// Écart de caisse cumulé d'une station : montant théorique actuellement en caisse / non
-// encore versé, recalculé directement depuis l'historique des ventes, bons et versements
-// de la station — sans dépendre de la saisie manuelle jour par jour de « Caisse précédente »
-// dans l'onglet Caisse (ce report manuel peut être oublié ou mal renseigné, ex. après un
-// versement partiel d'un solde accumulé sur plusieurs jours).
-// C'est l'équivalent du « Solde caisse théorique cumulé » d'un suivi Excel classique — qui
-// démarre lui aussi d'une ligne de départ (stock/caisse vérifié), pas du tout premier jour
-// d'exploitation de la station. Si une « Caisse de référence » (avec sa date) est définie
-// pour la station (onglet Stations), seuls les mouvements postérieurs à cette date sont
-// additionnés à ce solde de départ ; sinon, par défaut, tout l'historique est utilisé (une
-// station sans référence définie ni la moindre saisie ancienne donne le même résultat).
-function ecartCaisseCumule(db, stationId) {
-  const station = (db.stations || []).find((s) => s.id === stationId);
-  const refDate = station?.caisseReferenceDate || null;
-  const refMontant = num(station?.caisseReference);
-
-  const dates = new Set();
-  (db.releves || []).forEach((r) => { if (r.stationId === stationId && (!refDate || r.date > refDate)) dates.add(r.date); });
-  (db.ventes || []).forEach((v) => { if (v.stationId === stationId && (!refDate || v.date > refDate)) dates.add(v.date); });
-  let ca = 0;
-  dates.forEach((date) => { ca += computeVente(db.releves, db.ventes, stationId, date).ca; });
-
-  const bonsStation = (db.bons || []).filter((b) => b.stationId === stationId && (!refDate || b.date > refDate));
-  const versementsStation = (db.versements || []).filter((v) => v.stationId === stationId && (!refDate || v.date > refDate));
-  const totalBon = sumBons(bonsStation);
-  const totalVersement = sumVersements(versementsStation);
-  const totalPaiementMarchandManuel = (db.caisses || []).filter((c) => c.stationId === stationId && (!refDate || c.date > refDate)).reduce((a, c) => a + num(c.totalPaiementMarchand), 0);
-  return refMontant + ca - totalBon - totalVersement - totalPaiementMarchandManuel;
-}
-
-// Écart de stock cumulé (essence/gasoil) d'une station : stock théorique recalculé depuis
-// la toute première saisie Stock de la station — stock de départ (stockOuverture de cette
-// première ligne) + toutes les réceptions/livraisons enregistrées depuis, moins tout le
-// carburant distribué aux pompes. Ce dernier point se calcule pompe par pompe comme l'index
-// de clôture le plus récent moins l'index d'ouverture de la toute première saisie de cette
-// pompe — une simple différence d'index cumulée, qui ne nécessite pas un relevé quotidien
-// ininterrompu (contrairement à une somme jour par jour, fragile au moindre jour manqué).
-// Comparé au dernier stock physique jaugé, ça donne un écart de stock (manquant/surplus en
-// cuve) fiable même avec des trous dans les saisies — l'équivalent, pour le carburant, de
-// l'Écart de caisse cumulé ci-dessus.
-function ecartStockCumule(db, stationId) {
-  const station = (db.stations || []).find((s) => s.id === stationId);
-  const refDate = station?.stockReferenceDate || null;
-
-  const stocksStation = (db.stocks || []).filter((s) => s.stationId === stationId).sort((a, b) => (a.date < b.date ? -1 : 1));
-  if (stocksStation.length === 0) return null;
-  const dernier = stocksStation[stocksStation.length - 1];
-
-  // Stock de départ : la « Stock de référence » saisie dans Stations si elle existe (comme
-  // la ligne de départ d'un tableau Excel), sinon la toute première saisie Stock de l'app.
-  let dateDepart, stockDepartEssence, stockDepartGasoil, stocksApresDepart;
-  if (refDate) {
-    dateDepart = refDate;
-    stockDepartEssence = num(station.stockReferenceEssence);
-    stockDepartGasoil = num(station.stockReferenceGasoil);
-    stocksApresDepart = stocksStation.filter((s) => s.date > refDate);
-  } else {
-    const premier = stocksStation[0];
-    dateDepart = premier.date;
-    stockDepartEssence = num(premier.stockOuvertureEssence);
-    stockDepartGasoil = num(premier.stockOuvertureGasoil);
-    stocksApresDepart = stocksStation.slice(1);
-  }
-  const receptionsEssence = stocksApresDepart.reduce((a, s) => a + num(s.livraisonEssence), 0);
-  const receptionsGasoil = stocksApresDepart.reduce((a, s) => a + num(s.livraisonGasoil), 0);
-
-  let venduEssence = 0, venduGasoil = 0;
-  const pompesStation = (db.pompes || []).filter((p) => p.stationId === stationId);
-  pompesStation.forEach((p) => {
-    const relevesP = (db.releves || [])
-      .filter((r) => r.stationId === stationId && r.pompeId === p.id && (!refDate || r.date > refDate))
-      .sort((a, b) => (a.date < b.date ? -1 : 1));
-    if (relevesP.length === 0) return;
-    const first = relevesP[0], last = relevesP[relevesP.length - 1];
-    venduEssence += Math.max(0, num(last.indexClotureEssence) - num(first.indexOuvertureEssence));
-    venduGasoil += Math.max(0, num(last.indexClotureGasoil) - num(first.indexOuvertureGasoil));
-  });
-
-  const stockTheoriqueEssence = stockDepartEssence + receptionsEssence - venduEssence;
-  const stockTheoriqueGasoil = stockDepartGasoil + receptionsGasoil - venduGasoil;
-  const dernierCompute = computeStock(db.releves, db.stocks, stationId, dernier.date);
-  const stockPhysiqueEssence = stockAffichable(dernierCompute, "essence");
-  const stockPhysiqueGasoil = stockAffichable(dernierCompute, "gasoil");
-  return {
-    dateDepart,
-    dateActuelle: dernier.date,
-    stockTheoriqueEssence, stockTheoriqueGasoil,
-    stockPhysiqueEssence, stockPhysiqueGasoil,
-    ecartEssence: stockPhysiqueEssence !== null && stockPhysiqueEssence !== undefined ? stockPhysiqueEssence - stockTheoriqueEssence : null,
-    ecartGasoil: stockPhysiqueGasoil !== null && stockPhysiqueGasoil !== undefined ? stockPhysiqueGasoil - stockTheoriqueGasoil : null,
-  };
+  return { record: c.id ? c : null, ca, caissePrecedente, totalBon, totalVersement, totalPaiementMarchand, totalDepenses, totalEncaissements, caisseAttendue, caisseDuJour, ecart, bons, versements };
 }
 
 /* --------------------------- Persistence hook -------------------------- */
 
 const DB_KEY = "smi_sarl_db_v1";
-const PROFILE_KEY = "smi_sarl_profile_v1";
-const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], commandesReseau: [], passations: [], audit: [] };
-const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires", "commandesReseau", "passations"];
+const emptyDb = { stations: [], pompes: [], releves: [], ventes: [], stocks: [], caisses: [], inspections: [], receptions: [], mouvements: [], versements: [], bons: [], pompistes: [], gerants: [], partenaires: [], commandesPartenaires: [], versementsPartenaires: [], commandesReseau: [], passations: [], cuves: [], fournisseurs: [], paiementsFournisseurs: [], depenses: [], clients: [], reglementsClients: [], factures: [], parametres: [], profils: [], utilisateurs: [], comptesStations: [], audit: [] };
+const COLLECTIONS = ["stations", "pompes", "releves", "ventes", "stocks", "caisses", "inspections", "receptions", "mouvements", "versements", "bons", "pompistes", "gerants", "partenaires", "commandesPartenaires", "versementsPartenaires", "commandesReseau", "passations", "cuves", "fournisseurs", "paiementsFournisseurs", "depenses", "clients", "reglementsClients", "factures", "parametres", "profils", "utilisateurs", "comptesStations"];
 
 // Grille de contrôle standard pour l'inspection d'une station. Chaque point est noté
 // Conforme / Non conforme / Non applicable, avec une remarque libre optionnelle.
@@ -576,31 +548,46 @@ function mergeDb(remote, base, local) {
 
 function useSmiStorage() {
   const [db, setDbState] = useState(null);
-  const [profile, setProfileState] = useState(undefined); // undefined = loading, null = none set
+  // La session (profil + société) est propre à cet appareil : elle vient du navigateur,
+  // jamais de la base partagée.
+  const [session, setSessionState] = useState(() => getSession());
+  const profile = session?.profile || null;
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
+  const [logoutReason, setLogoutReason] = useState("");
 
   // baseDbRef garde la dernière version connue comme "commune" (juste après chargement ou
   // écriture réussie), pour servir de référence à la fusion à 3 lors de la prochaine écriture.
   const baseDbRef = useRef(emptyDb);
 
+  // Le serveur peut refuser la session (expirée, société suspendue...) : retour à l'écran
+  // de connexion avec le message reçu.
   useEffect(() => {
+    const onLogout = (e) => { setLogoutReason(e.detail || ""); setSessionState(null); setDbState(null); };
+    window.addEventListener("gsp-logout", onLogout);
+    return () => window.removeEventListener("gsp-logout", onLogout);
+  }, []);
+
+  useEffect(() => {
+    setNomSociete(session?.tenant?.nom || "");
+    if (!session?.token) { setReady(true); return; }
+    let cancelled = false;
+    setReady(false);
     (async () => {
       let loadedDb = emptyDb;
       try {
         const r = await storage.get(DB_KEY);
         if (r?.value) loadedDb = { ...emptyDb, ...JSON.parse(r.value) };
-      } catch {
-        try { await storage.set(DB_KEY, JSON.stringify(emptyDb)); } catch { /* le prochain enregistrement réessaiera */ }
+      } catch (e) {
+        if (e?.auth) return;
+        // Nouvelle société : la base n'existe pas encore, on la crée vide.
+        if (session.profile?.role === "admin") {
+          try { await storage.set(DB_KEY, JSON.stringify(emptyDb)); } catch { /* le prochain enregistrement réessaiera */ }
+        }
       }
-      let loadedProfile = null;
-      try {
-        const r2 = await storage.get(PROFILE_KEY);
-        if (r2?.value) loadedProfile = JSON.parse(r2.value);
-      } catch { /* pas de profil enregistré */ }
+      if (cancelled) return;
       baseDbRef.current = loadedDb;
       setDbState(loadedDb);
-      setProfileState(loadedProfile);
       setReady(true);
       // Après la première tentative de chargement, on sait si l'API distante répond ou non.
       if (isStorageDegraded()) {
@@ -609,7 +596,8 @@ function useSmiStorage() {
           : "Stockage indisponible pour l'instant : les données ne seront conservées que le temps de cette session.");
       }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [session?.token]);
 
   const lastDbRef = useRef(null);
   const writeChainRef = useRef(Promise.resolve());
@@ -655,15 +643,14 @@ function useSmiStorage() {
     if (lastDbRef.current) persistDb(lastDbRef.current);
   }, [persistDb]);
 
-  const persistProfile = useCallback(async (next) => {
-    setProfileState(next);
-    try {
-      if (next === null) await storage.delete(PROFILE_KEY);
-      else await storage.set(PROFILE_KEY, JSON.stringify(next));
-    } catch { /* non bloquant : le profil se redemandera si besoin */ }
+  // Connexion réussie (session enregistrée par storage.login) ou déconnexion (null).
+  const setProfile = useCallback((next) => {
+    if (next === null) { setSession(null); setDbState(null); setLogoutReason(""); setSessionState(null); return; }
+    setLogoutReason("");
+    setSessionState(getSession());
   }, []);
 
-  return { db, setDb: persistDb, profile, setProfile: persistProfile, ready, error, retrySave };
+  return { db, setDb: persistDb, profile, setProfile, ready, error, retrySave, tenant: session?.tenant || null, logoutReason };
 }
 
 /* ------------------------------ UI atoms -------------------------------- */
@@ -854,66 +841,36 @@ function PompeSelect({ pompes, stationId, value, onChange, disabled }) {
 
 const ADMIN_PIN_KEY = "smi_sarl_admin_pin_v1";
 
-function RoleGate({ db, onSet }) {
+const LAST_SOCIETE_KEY = "gsp_derniere_societe";
+
+// Écran de connexion : code société + profil + nom + code. Tout est vérifié par le
+// serveur (/api/login) ; la session obtenue reste sur cet appareil uniquement.
+function LoginScreen({ onLoggedIn, reason }) {
+  const [societe, setSociete] = useState(() => { try { return localStorage.getItem(LAST_SOCIETE_KEY) || ""; } catch { return ""; } });
   const [role, setRole] = useState("admin");
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
-  const [adminPinHash, setAdminPinHash] = useState(undefined); // undefined = chargement, null = pas encore défini
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
+  const [err, setErr] = useState(reason || "");
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await storage.get(ADMIN_PIN_KEY, true);
-        setAdminPinHash(r?.value || null);
-      } catch { setAdminPinHash(null); }
-    })();
-  }, []);
-
-  const isFirstAdmin = role === "admin" && adminPinHash === null;
-
-  const canSubmit = !busy && adminPinHash !== undefined
-    && ((role === "pompiste" || role === "gerant") ? (name.trim().length > 0 && pin.trim().length > 0) : name.trim().length > 0);
+  const canSubmit = !busy && societe.trim() && name.trim() && pin.trim();
 
   const submit = async () => {
     setErr("");
-    if (!name.trim()) { setErr((role === "pompiste" || role === "gerant") ? "Indiquez votre nom d'utilisateur." : "Indiquez votre nom : il apparaîtra dans le journal des saisies."); return; }
     setBusy(true);
     try {
-      if (role === "pompiste") {
-        if (!pin.trim()) { setErr("Indiquez votre mot de passe."); setBusy(false); return; }
-        const h = hashPin(pin.trim());
-        const acct = db.pompistes.find((p) => p.nom.trim().toLowerCase() === name.trim().toLowerCase() && p.passwordHash === h);
-        if (!acct) { setErr("Nom ou mot de passe incorrect."); setBusy(false); return; }
-        onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId, name: acct.nom });
-        return;
-      }
-      if (role === "gerant") {
-        if (!pin.trim()) { setErr("Indiquez votre mot de passe."); setBusy(false); return; }
-        const h = hashPin(pin.trim());
-        const acct = (db.gerants || []).find((g) => g.nom.trim().toLowerCase() === name.trim().toLowerCase() && g.passwordHash === h);
-        if (!acct) { setErr("Nom ou mot de passe incorrect."); setBusy(false); return; }
-        onSet({ role, stationId: acct.stationId, pompeId: acct.pompeId || null, partenaireId: acct.partenaireId || null, name: acct.nom });
-        return;
-      }
-      if (role === "admin") {
-        if (isFirstAdmin) {
-          if (pin.trim().length < 4) { setErr("Choisissez un code PIN d'au moins 4 chiffres (première connexion admin)."); setBusy(false); return; }
-          const h = hashPin(pin.trim());
-          await storage.set(ADMIN_PIN_KEY, h, true);
-        } else {
-          const h = hashPin(pin.trim());
-          if (h !== adminPinHash) { setErr("Code PIN administrateur incorrect."); setBusy(false); return; }
-        }
-      }
-      onSet({ role, stationId: null, pompeId: null, name: name.trim() });
-    } catch {
-      setErr("Impossible de vérifier le code PIN pour le moment (problème de connexion au stockage). Réessayez.");
+      await login({ societe: societe.trim(), role, name: name.trim(), pin: pin.trim() });
+      try { localStorage.setItem(LAST_SOCIETE_KEY, societe.trim()); } catch { /* non bloquant */ }
+      onLoggedIn();
+    } catch (e) {
+      setErr(e.message || "Connexion impossible pour le moment. Réessayez.");
     } finally {
       setBusy(false);
     }
   };
+
+  const isAgent = role === "pompiste" || role === "gerant" || role === "siege";
+  const inputStyle = { background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text };
 
   return (
     <div className="smi-root min-h-screen flex items-center justify-center p-6">
@@ -922,22 +879,25 @@ function RoleGate({ db, onSet }) {
         <div className="flex items-center gap-3 mb-1">
           <Logo size={40} />
           <div>
-            <p className="smi-display text-2xl leading-none">SMI SARL</p>
-            <p className="text-xs" style={{ color: C.textMuted }}>Réseau stations-service · GNF</p>
+            <p className="smi-display text-2xl leading-none">{APP_NAME}</p>
+            <p className="text-xs" style={{ color: C.textMuted }}>Gestion de réseaux de stations-service</p>
           </div>
         </div>
-        <p className="text-sm mt-4 mb-3" style={{ color: C.textMuted }}>Choisissez votre profil d'accès pour continuer.</p>
+        <p className="text-sm mt-4 mb-3" style={{ color: C.textMuted }}>Connectez-vous à l'espace de votre société.</p>
 
-        <div className="grid grid-cols-3 gap-2 mb-4">
-          {[{ k: "admin", label: "Administrateur", hint: "Vue complète" }, { k: "gerant", label: "Gérant", hint: "Saisie de sa station" }, { k: "pompiste", label: "Pompiste", hint: "Sa pompe uniquement" }].map((r) => (
+        <div className="mb-3">
+          <Field label="Code société" hint="Communiqué à la création de votre compte.">
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={inputStyle} value={societe} onChange={(e) => setSociete(e.target.value)} placeholder="ex : smi" autoCapitalize="none" autoCorrect="off" />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          {[{ k: "admin", label: "Administrateur", hint: "Vue complète" }, { k: "siege", label: "Siège", hint: "Comptable, direction…" }, { k: "gerant", label: "Gérant", hint: "Saisie de sa station" }, { k: "pompiste", label: "Pompiste", hint: "Sa pompe uniquement" }].map((r) => (
             <button
               key={r.k}
               onClick={() => setRole(r.k)}
               className="smi-btn rounded-md p-3 text-left transition-colors"
-              style={{
-                background: role === r.k ? C.amberSoft : C.bgAlt,
-                border: `1px solid ${role === r.k ? C.amber : C.border}`,
-              }}
+              style={{ background: role === r.k ? C.amberSoft : C.bgAlt, border: `1px solid ${role === r.k ? C.amber : C.border}` }}
             >
               <p className="font-semibold text-sm" style={{ color: role === r.k ? C.amber : C.text }}>{r.label}</p>
               <p className="text-xs mt-0.5" style={{ color: C.textFaint }}>{r.hint}</p>
@@ -945,33 +905,24 @@ function RoleGate({ db, onSet }) {
           ))}
         </div>
 
+        {role === "siege" && (
+          <p className="text-xs mb-3" style={{ color: C.textFaint }}>Compte créé par l'administrateur (onglet Sécurité), avec les modules auxquels vous avez droit.</p>
+        )}
         {role === "gerant" && (
-          <p className="text-xs mb-3" style={{ color: C.textFaint }}>
-            Votre compte est créé par un administrateur depuis l'onglet Stations. Entrez ci-dessous le nom et le mot de passe qu'il vous a communiqués.
-          </p>
+          <p className="text-xs mb-3" style={{ color: C.textFaint }}>Votre compte est créé par un administrateur depuis l'onglet Stations. Entrez le nom et le mot de passe qu'il vous a communiqués.</p>
         )}
-
         {role === "pompiste" && (
-          <p className="text-xs mb-3" style={{ color: C.textFaint }}>
-            Votre compte (pompe assignée) est créé par votre gérant depuis l'onglet Mouvements Pompiste. Entrez ci-dessous le nom et le mot de passe qu'il vous a communiqués.
-          </p>
+          <p className="text-xs mb-3" style={{ color: C.textFaint }}>Votre compte (pompe assignée) est créé par votre gérant depuis l'onglet Mouvements Pompiste. Entrez le nom et le mot de passe qu'il vous a communiqués.</p>
         )}
 
-        <Field label={(role === "pompiste" || role === "gerant") ? "Nom d'utilisateur" : "Votre nom"} hint={(role === "pompiste" || role === "gerant") ? undefined : "Utilisé pour identifier vos saisies dans le journal."}>
-          <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={name} onChange={(e) => setName(e.target.value)} placeholder={(role === "pompiste" || role === "gerant") ? "ex : Mamadou Diallo" : "ex : Mamadou Diallo"} />
-        </Field>
-
-        {role === "admin" && (
-          <Field label={isFirstAdmin ? "Créer le code PIN administrateur" : "Code PIN administrateur"} hint={isFirstAdmin ? "Première connexion : ce code sera demandé à chaque accès admin." : undefined}>
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
+        <div className="flex flex-col gap-3 mb-3">
+          <Field label={isAgent ? "Nom d'utilisateur" : "Votre nom"} hint={isAgent ? undefined : "Utilisé pour identifier vos saisies dans le journal."}>
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="ex : Mamadou Diallo" />
           </Field>
-        )}
-
-        {(role === "pompiste" || role === "gerant") && (
-          <Field label="Mot de passe">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} type="password" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="••••" />
+          <Field label={isAgent ? "Mot de passe" : "Code PIN administrateur"}>
+            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={inputStyle} type="password" inputMode={isAgent ? undefined : "numeric"} value={pin} onChange={(e) => setPin(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && canSubmit) submit(); }} placeholder="••••" />
           </Field>
-        )}
+        </div>
 
         {err && (
           <p className="text-xs flex items-center gap-1.5 mb-3" style={{ color: C.danger }}>
@@ -979,12 +930,8 @@ function RoleGate({ db, onSet }) {
           </p>
         )}
 
-        <Button
-          className="w-full justify-center"
-          disabled={!canSubmit}
-          onClick={submit}
-        >
-          {busy ? "Vérification…" : "Continuer"} <ChevronRight size={16} />
+        <Button className="w-full justify-center" disabled={!canSubmit} onClick={submit}>
+          {busy ? "Vérification…" : "Se connecter"} <ChevronRight size={16} />
         </Button>
       </Card>
     </div>
@@ -1007,6 +954,8 @@ function StationsView({ db, setDb, profile }) {
   const [acctNom, setAcctNom] = useState("");
   const [acctPassword, setAcctPassword] = useState("");
   const [acctPartenaireId, setAcctPartenaireId] = useState("");
+  const [acctProfilId, setAcctProfilId] = useState("");
+  const profilsGerant = (db.profils || []).filter((x) => x.type === "gerant");
   const [acctErr, setAcctErr] = useState("");
   const [resettingId, setResettingId] = useState(null);
   const [newPassInput, setNewPassInput] = useState("");
@@ -1051,11 +1000,11 @@ function StationsView({ db, setDb, profile }) {
     if (!acctStationId) { setAcctErr("Choisissez une station."); return; }
     if (!acctNom.trim()) { setAcctErr("Indiquez le nom du gérant."); return; }
     if (acctPassword.trim().length < 4) { setAcctErr("Le mot de passe doit faire au moins 4 caractères."); return; }
-    const row = { id: uid(), stationId: acctStationId, pompeId: null, partenaireId: acctPartenaireId || null, nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
+    const row = { id: uid(), stationId: acctStationId, pompeId: null, partenaireId: acctPartenaireId || null, profilId: acctProfilId || "", nom: acctNom.trim(), passwordHash: hashPin(acctPassword.trim()) };
     let next = { ...db, gerants: [...(db.gerants || []), row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: acctStationId, entity: "gerant_compte", action: "création", after: { nom: row.nom } });
     setDb(next);
-    setAcctNom(""); setAcctPassword(""); setAcctPartenaireId("");
+    setAcctNom(""); setAcctPassword(""); setAcctPartenaireId(""); setAcctProfilId("");
   };
 
   // Réinitialise uniquement le mot de passe d'un compte — nom, station et pompe assignée
@@ -1096,27 +1045,12 @@ function StationsView({ db, setDb, profile }) {
             </p>
           )}
           <div className="grid sm:grid-cols-2 gap-3">
-            <Field label="Nom de la station"><TextInput value={form.nom || ""} onChange={(e) => setForm({ ...form, nom: e.target.value })} placeholder="Ex. SMI Kaloum" /></Field>
+            <Field label="Nom de la station"><TextInput value={form.nom || ""} onChange={(e) => setForm({ ...form, nom: e.target.value })} placeholder="Ex. Station Kaloum" /></Field>
             <Field label="Fournisseur carburant"><TextInput value={form.fournisseur || ""} onChange={(e) => setForm({ ...form, fournisseur: e.target.value })} placeholder="Ex. Total Guinée" /></Field>
             <Field label="Localisation"><TextInput value={form.localisation || ""} onChange={(e) => setForm({ ...form, localisation: e.target.value })} placeholder="Ex. Conakry, Kaloum" /></Field>
             <Field label="Devise"><TextInput value={form.devise ?? "GNF"} onChange={(e) => setForm({ ...form, devise: e.target.value })} /></Field>
             <Field label="Fond de roulement (L)" hint="Seuil minimum de stock total (essence + gasoil) à maintenir — sert à alerter avant une rupture.">
               <NumberInput value={form.fondRoulement ?? ""} onChange={(e) => setForm({ ...form, fondRoulement: e.target.value })} />
-            </Field>
-            <Field label="Caisse de référence (GNF)" hint="Solde de caisse vérifié (comptage physique ou audit) à la date ci-dessous. Sert de point de départ à l'Écart de caisse cumulé du Tableau de bord — comme la ligne de départ d'un tableau de suivi Excel — au lieu de tout recalculer depuis la toute première saisie de l'app.">
-              <NumberInput value={form.caisseReference ?? ""} onChange={(e) => setForm({ ...form, caisseReference: e.target.value })} />
-            </Field>
-            <Field label="Date de cette caisse de référence" hint="Seuls les mouvements (ventes, bons, versements) postérieurs à cette date sont ajoutés au calcul.">
-              <TextInput type="date" value={form.caisseReferenceDate || ""} onChange={(e) => setForm({ ...form, caisseReferenceDate: e.target.value })} max={todayISO()} />
-            </Field>
-            <Field label="Stock de référence — Essence (L)" hint="Stock jaugé vérifié à la date ci-dessous. Sert de point de départ à l'Écart de stock cuve du Tableau de bord, au lieu de partir de la toute première saisie Stock de l'app.">
-              <NumberInput value={form.stockReferenceEssence ?? ""} onChange={(e) => setForm({ ...form, stockReferenceEssence: e.target.value })} />
-            </Field>
-            <Field label="Stock de référence — Gasoil (L)" hint="Même principe que ci-dessus, pour le gasoil.">
-              <NumberInput value={form.stockReferenceGasoil ?? ""} onChange={(e) => setForm({ ...form, stockReferenceGasoil: e.target.value })} />
-            </Field>
-            <Field label="Date de ce stock de référence" hint="Seules les réceptions et les ventes pompées postérieures à cette date sont ajoutées au calcul.">
-              <TextInput type="date" value={form.stockReferenceDate || ""} onChange={(e) => setForm({ ...form, stockReferenceDate: e.target.value })} max={todayISO()} />
             </Field>
             <Field label="Couleur de la station" hint="Pour la repérer facilement sur ses cartes dans l'application.">
               <div className="flex gap-2 flex-wrap items-center">
@@ -1194,6 +1128,16 @@ function StationsView({ db, setDb, profile }) {
             </SelectInput>
           </Field>
         </div>
+        {profilsGerant.length > 0 && (
+          <div className="mt-3">
+            <Field label="Profil de droits (optionnel)" hint="Vide = tous les modules d'un gérant. Les profils se gèrent dans Sécurité.">
+              <SelectInput value={acctProfilId} onChange={(e) => setAcctProfilId(e.target.value)}>
+                <option value="">Gérant (accès complet à sa station)</option>
+                {profilsGerant.map((x) => <option key={x.id} value={x.id}>{x.nom}</option>)}
+              </SelectInput>
+            </Field>
+          </div>
+        )}
         {acctErr && <p className="text-xs flex items-center gap-1.5 mt-2 mb-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {acctErr}</p>}
         <div className="flex justify-end mt-3"><Button onClick={createGerantAccount}><Plus size={15} /> Créer le compte</Button></div>
 
@@ -1204,6 +1148,12 @@ function StationsView({ db, setDb, profile }) {
               <div key={acct.id} className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-xs">
                   <span>{acct.nom} — <span style={{ color: C.textFaint }}>{db.stations.find((s) => s.id === acct.stationId)?.nom || "—"}{acct.partenaireId ? ` · Partenaire : ${(db.partenaires || []).find((p) => p.id === acct.partenaireId)?.nom || "—"}` : ""}</span></span>
+                  {profilsGerant.length > 0 && (
+                    <select className="smi-select rounded-md px-1 py-0.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={acct.profilId || ""} onChange={(e) => setDb(withAudit({ ...db, gerants: db.gerants.map((g) => (g.id === acct.id ? { ...g, profilId: e.target.value } : g)) }, { user: profile?.name, role: profile?.role, stationId: acct.stationId, entity: "gerant_compte", action: "changement de profil", after: { nom: acct.nom, profil: profilsGerant.find((x) => x.id === e.target.value)?.nom || "Gérant" } }))}>
+                      <option value="">Gérant</option>
+                      {profilsGerant.map((x) => <option key={x.id} value={x.id}>{x.nom}</option>)}
+                    </select>
+                  )}
                   <div className="flex items-center gap-2">
                     <button onClick={() => { setResettingId(resettingId === acct.id ? null : acct.id); setResetErr(""); setNewPassInput(""); }} className="smi-btn" style={{ color: C.teal }}><Lock size={13} /></button>
                     <button onClick={() => removeGerantAccount(acct)} className="smi-btn" style={{ color: C.danger }}><Trash2 size={13} /></button>
@@ -2018,7 +1968,7 @@ function CaisseView({ db, setDb, profile }) {
   const isGerant = profile.role === "gerant";
   const [stationId, setStationId] = useState(profile.stationId || db.stations[0]?.id || "");
   const [date, setDate] = useState(todayISO());
-  const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, date);
+  const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, date, db.depenses, db.reglementsClients);
 
   const [precedente, setPrecedente] = useState("");
   const [duJour, setDuJour] = useState("");
@@ -2041,7 +1991,7 @@ function CaisseView({ db, setDb, profile }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, date]);
 
-  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalPaiementMarchand: paiementMarchand }], db.bons, db.versements, stationId, date);
+  const live = computeCaisse(db.releves, db.ventes, [...db.caisses.filter((x) => x.id !== c.record?.id), { stationId, date, caissePrecedente: precedente, caisseDuJour: duJour, totalPaiementMarchand: paiementMarchand }], db.bons, db.versements, stationId, date, db.depenses, db.reglementsClients);
   const [err, setErr] = useState("");
   const station = db.stations.find((s) => s.id === stationId);
   const devise = station?.devise || "GNF";
@@ -2089,6 +2039,20 @@ function CaisseView({ db, setDb, profile }) {
             <GaugeNumber value={fmtMontant(live.totalVersement, devise)} />
             <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris automatiquement de l'onglet Versement — déduit de la caisse attendue. Mettez 0 dans « Caisse précédente » le jour où tout a été versé.</p>
           </div>
+          {live.totalEncaissements > 0 && (
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Règlements clients encaissés (auto)</p>
+              <GaugeNumber value={fmtMontant(live.totalEncaissements, devise)} />
+              <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Repris de l'onglet Clients à crédit — ajoutés à la caisse attendue.</p>
+            </div>
+          )}
+          {live.totalDepenses > 0 && (
+            <div className="rounded-md p-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <p className="text-xs uppercase font-semibold mb-1" style={{ color: C.textMuted }}>Dépenses payées par la caisse (auto)</p>
+              <GaugeNumber value={fmtMontant(live.totalDepenses, devise)} />
+              <p className="text-xs mt-1.5" style={{ color: C.textFaint }}>Reprises de l'onglet Dépenses — déduites de la caisse attendue.</p>
+            </div>
+          )}
         </div>
 
         <div className="grid sm:grid-cols-3 gap-3 mt-5">
@@ -2562,7 +2526,7 @@ function VersementView({ db, setDb, profile }) {
 
       <Card className="smi-print-area">
         <div className="hidden smi-print-only mb-3">
-          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Historique des versements</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Historique des versements</h1>
           <p style={{ fontSize: 13, color: "#444" }}>{station?.nom || "Toutes stations"}</p>
         </div>
         <p className="font-semibold text-sm mb-3">Historique des versements</p>
@@ -2641,7 +2605,7 @@ function VersementView({ db, setDb, profile }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <QrCode value={appUrl} size={64} />
           <div>
-            <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+            <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
             <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
           </div>
         </div>
@@ -2670,6 +2634,18 @@ function BonsView({ db, setDb, profile }) {
   const [quantite, setQuantite] = useState("");
   const [prixUnitaire, setPrixUnitaire] = useState("");
   const [fraisRoute, setFraisRoute] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [produitBon, setProduitBon] = useState("gasoil");
+  const [immatriculation, setImmatriculation] = useState("");
+  const [numeroBon, setNumeroBon] = useState("");
+  const clients = db.clients || [];
+  // Vente à crédit : le prix du jour de la station est proposé automatiquement.
+  useEffect(() => {
+    if (!clientId || prixUnitaire) return;
+    const v = findVente(db.ventes, stationId, date) || latestBefore(db.ventes, stationId, date);
+    const pr = v ? (produitBon === "essence" ? v.prixEssence : v.prixGasoil) : "";
+    if (num(pr) > 0) setPrixUnitaire(String(pr));
+  }, [clientId, produitBon, stationId, date]); // eslint-disable-line react-hooks/exhaustive-deps
   const [photo, setPhoto] = useState(null);
   const [err, setErr] = useState("");
   const [expandedDate, setExpandedDate] = useState(null);
@@ -2692,7 +2668,7 @@ function BonsView({ db, setDb, profile }) {
   };
 
   const reset = () => {
-    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null);
+    setLibelle(""); setQuantite(""); setPrixUnitaire(""); setFraisRoute(""); setPhoto(null); setEditingId(null); setClientId(""); setImmatriculation(""); setNumeroBon("");
   };
 
   // Charge une ligne existante dans le formulaire pour la corriger — plus besoin de
@@ -2705,6 +2681,10 @@ function BonsView({ db, setDb, profile }) {
     setQuantite(b.quantite ?? "");
     setPrixUnitaire(b.prixUnitaire ?? "");
     setFraisRoute(b.fraisRoute ?? "");
+    setClientId(b.clientId || "");
+    setProduitBon(b.produit || "gasoil");
+    setImmatriculation(b.immatriculation || "");
+    setNumeroBon(b.numeroBon || "");
     setPhoto(b.photo || null);
     setEditingId(b.id);
   };
@@ -2713,11 +2693,13 @@ function BonsView({ db, setDb, profile }) {
     setErr("");
     const effStationId = isGerant ? profile.stationId : stationId;
     if (!effStationId) { setErr("Choisissez une station."); return; }
-    if (!libelle.trim()) { setErr("Indiquez un libellé pour ce bon."); return; }
+    const cli = clients.find((c) => c.id === clientId);
+    const lib = libelle.trim() || (cli ? `Client ${cli.nom}` : "");
+    if (!lib) { setErr("Indiquez un libellé pour ce bon."); return; }
     if (total <= 0) { setErr("Indiquez une quantité et un prix, ou des frais de route."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.bons.find((b) => b.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: libelle.trim(), quantite, prixUnitaire, fraisRoute, photo, timestamp: existing?.timestamp || new Date().toISOString() };
+    const row = { id: editingId || uid(), stationId: effStationId, date, libelle: lib, quantite, prixUnitaire, fraisRoute, photo, clientId: cli ? cli.id : "", produit: cli ? produitBon : (existing?.produit || ""), immatriculation: immatriculation.trim(), numeroBon: numeroBon.trim(), timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, bons: editingId ? db.bons.map((b) => (b.id === editingId ? row : b)) : [...db.bons, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "bon", action: editingId ? "modification" : "création", before: existing ? { libelle: existing.libelle, date: existing.date } : null, after: { date, libelle: row.libelle, total } });
     setDb(next);
@@ -2787,6 +2769,21 @@ function BonsView({ db, setDb, profile }) {
         </div>
 
         <div className="flex flex-col gap-3">
+          {clients.length > 0 && (
+            <Field label="Client à crédit (facultatif)" hint="Choisissez le client si ce carburant lui est vendu à crédit : le montant s'ajoute à son compte.">
+              <SelectInput value={clientId} onChange={(e) => setClientId(e.target.value)}>
+                <option value="">— Aucun (bon interne) —</option>
+                {clients.map((c) => <option key={c.id} value={c.id}>{c.nom}</option>)}
+              </SelectInput>
+            </Field>
+          )}
+          {clientId && (
+            <div className="grid sm:grid-cols-3 gap-3">
+              <Field label="Produit"><SelectInput value={produitBon} onChange={(e) => setProduitBon(e.target.value)}><option value="gasoil">Gasoil</option><option value="essence">Essence</option></SelectInput></Field>
+              <Field label="Immatriculation"><input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={immatriculation} onChange={(e) => setImmatriculation(e.target.value)} /></Field>
+              <Field label="N° du bon"><input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={numeroBon} onChange={(e) => setNumeroBon(e.target.value)} /></Field>
+            </div>
+          )}
           <Field label="Libellé" hint="Utilisez « Citerne » ou « Groupe / Transport / Vidange » dans le libellé pour un classement automatique correct dans les cumuls.">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="ex : Citerne BI 7077" />
           </Field>
@@ -2823,7 +2820,7 @@ function BonsView({ db, setDb, profile }) {
 
       <Card className="smi-print-area">
         <div className="hidden smi-print-only mb-3">
-          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Historique des bons</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Historique des bons</h1>
           <p style={{ fontSize: 13, color: "#444" }}>{isGerant ? station?.nom : (station?.nom || "Toutes stations")}</p>
         </div>
         <p className="font-semibold text-sm mb-3">Historique des bons</p>
@@ -2895,7 +2892,7 @@ function BonsView({ db, setDb, profile }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <QrCode value={appUrl} size={64} />
           <div>
-            <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+            <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
             <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
           </div>
         </div>
@@ -2912,6 +2909,11 @@ function ReceptionView({ db, setDb, profile }) {
   const [produit, setProduit] = useState("gasoil");
   const [quantite, setQuantite] = useState("");
   const [fournisseur, setFournisseur] = useState("");
+  const [fournisseurId, setFournisseurId] = useState("");
+  const [prixAchat, setPrixAchat] = useState("");
+  const [montantPaye, setMontantPaye] = useState("");
+  const isAdminR = profile.role === "admin";
+  const fournisseurs = db.fournisseurs || [];
   const [numeroBon, setNumeroBon] = useState("");
   const [photo, setPhoto] = useState(null);
   const [err, setErr] = useState("");
@@ -2930,7 +2932,7 @@ function ReceptionView({ db, setDb, profile }) {
   };
 
   const reset = () => {
-    setQuantite(""); setFournisseur(""); setNumeroBon(""); setPhoto(null); setEditingId(null);
+    setQuantite(""); setFournisseur(""); setFournisseurId(""); setPrixAchat(""); setMontantPaye(""); setNumeroBon(""); setPhoto(null); setEditingId(null);
   };
 
   // Charge une réception existante dans le formulaire pour la corriger — plus besoin de
@@ -2942,6 +2944,9 @@ function ReceptionView({ db, setDb, profile }) {
     setProduit(r.produit);
     setQuantite(r.quantite ?? "");
     setFournisseur(r.fournisseur || "");
+    setFournisseurId(r.fournisseurId || "");
+    setPrixAchat(r.prixAchat ?? "");
+    setMontantPaye(r.montantPaye ?? "");
     setNumeroBon(r.numeroBon || "");
     setPhoto(r.photo || null);
     setEditingId(r.id);
@@ -2954,7 +2959,14 @@ function ReceptionView({ db, setDb, profile }) {
     if (!quantite || num(quantite) <= 0) { setErr("Indiquez une quantité valide."); return; }
     if (isFutureDate(date)) { setErr("La date ne peut pas être dans le futur."); return; }
     const existing = editingId ? db.receptions.find((x) => x.id === editingId) : null;
-    const row = { id: editingId || uid(), stationId: effStationId, date, produit, quantite, fournisseur, numeroBon, photo, timestamp: existing?.timestamp || new Date().toISOString() };
+    if (num(montantPaye) > 0 && num(prixAchat) <= 0) { setErr("Indiquez le prix d'achat avant le montant payé."); return; }
+    if (num(prixAchat) > 0 && num(montantPaye) > num(quantite) * num(prixAchat)) { setErr("Le montant payé dépasse le montant de la livraison."); return; }
+    const four = fournisseurs.find((f) => f.id === fournisseurId);
+    // Le prix d'achat et le montant payé sont réservés à l'administrateur : un gérant qui
+    // corrige une réception ne les efface pas.
+    const prix = isAdminR ? prixAchat : (existing?.prixAchat ?? "");
+    const paye = isAdminR ? montantPaye : (existing?.montantPaye ?? "");
+    const row = { id: editingId || uid(), stationId: effStationId, date, produit, quantite, fournisseurId: four ? four.id : "", fournisseur: four ? four.nom : fournisseur, prixAchat: prix, montantPaye: paye, numeroBon, photo, timestamp: existing?.timestamp || new Date().toISOString() };
     let next = { ...db, receptions: editingId ? db.receptions.map((x) => (x.id === editingId ? row : x)) : [...db.receptions, row] };
     next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: effStationId, entity: "reception", action: editingId ? "modification" : "création", before: existing ? { produit: existing.produit, quantite: existing.quantite } : null, after: { produit, quantite, fournisseur, numeroBon } });
     setDb(next);
@@ -3009,10 +3021,30 @@ function ReceptionView({ db, setDb, profile }) {
               <option value="essence">Essence</option>
             </SelectInput>
           </Field>
-          <Field label="Quantité (L)"><NumberInput value={quantite} onChange={(e) => setQuantite(e.target.value)} /></Field>
-          <Field label="Fournisseur">
-            <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={fournisseur} onChange={(e) => setFournisseur(e.target.value)} />
+          {(() => {
+            const libre = stationId ? placeLibreProduit(db, stationId, produit) : null;
+            const trop = libre !== null && num(quantite) > libre;
+            return (
+              <Field label="Quantité (L)" hint={libre === null ? undefined : (trop ? `Attention : dépasse la place libre dans les cuves (${fmtVol(libre)}).` : `Place libre dans les cuves : ${fmtVol(libre)}.`)}>
+                <NumberInput value={quantite} onChange={(e) => setQuantite(e.target.value)} />
+              </Field>
+            );
+          })()}
+          <Field label="Fournisseur" hint={fournisseurs.length === 0 && isAdminR ? "Créez vos fournisseurs dans l'onglet Fournisseurs pour suivre ce que vous leur devez." : undefined}>
+            {fournisseurs.length > 0 && (
+              <SelectInput value={fournisseurId} onChange={(e) => setFournisseurId(e.target.value)}>
+                <option value="">— Autre (saisie libre) —</option>
+                {fournisseurs.map((f) => <option key={f.id} value={f.id}>{f.nom}</option>)}
+              </SelectInput>
+            )}
+            {!fournisseurId && <input className="smi-input w-full rounded-md px-3 py-2 text-sm mt-1" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={fournisseur} onChange={(e) => setFournisseur(e.target.value)} placeholder="Nom du fournisseur" />}
           </Field>
+          {isAdminR && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Prix d'achat / de cession (par litre)" hint={!prixAchat && prixCessionDefaut(db, stationId, produit) > 0 ? `Vide = prix de cession de la station (${fmtMontant(prixCessionDefaut(db, stationId, produit))}).` : undefined}><NumberInput value={prixAchat} onChange={(e) => setPrixAchat(e.target.value)} /></Field>
+              <Field label="Payé à la livraison" hint={num(prixAchat) > 0 && num(quantite) > 0 ? `Montant : ${fmtMontant(num(quantite) * num(prixAchat))} · reste dû ${fmtMontant(Math.max(0, num(quantite) * num(prixAchat) - num(montantPaye)))}` : undefined}><NumberInput value={montantPaye} onChange={(e) => setMontantPaye(e.target.value)} /></Field>
+            </div>
+          )}
           <Field label="N° Bon">
             <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={numeroBon} onChange={(e) => setNumeroBon(e.target.value)} />
           </Field>
@@ -3039,7 +3071,7 @@ function ReceptionView({ db, setDb, profile }) {
 
       <Card className="smi-print-area">
         <div className="hidden smi-print-only mb-3">
-          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Historique des réceptions</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Historique des réceptions</h1>
           <p style={{ fontSize: 13, color: "#444" }}>{db.stations.find((s) => s.id === stationId)?.nom || "Toutes stations"}</p>
         </div>
         <p className="font-semibold text-sm mb-3">Historique des réceptions</p>
@@ -3066,6 +3098,7 @@ function ReceptionView({ db, setDb, profile }) {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium">{r.produit === "essence" ? "Essence" : "Gasoil"} — {fmtVol(r.quantite)}</p>
                   <p className="text-xs truncate" style={{ color: C.textFaint }}>{fmtDateLong(r.date)} · {db.stations.find((s) => s.id === r.stationId)?.nom || "—"} · {r.fournisseur || "—"} {r.numeroBon ? `· Bon n° ${r.numeroBon}` : ""}</p>
+                  {isAdminR && num(r.prixAchat) > 0 && <p className="text-xs smi-mono" style={{ color: C.textMuted }}>{fmtMontant(num(r.quantite) * num(r.prixAchat))} · payé {fmtMontant(r.montantPaye)}{num(r.quantite) * num(r.prixAchat) - num(r.montantPaye) > 0 ? ` · reste ${fmtMontant(num(r.quantite) * num(r.prixAchat) - num(r.montantPaye))}` : ""}</p>}
                 </div>
                 <button onClick={() => startEdit(r)} className="smi-btn flex-shrink-0" style={{ color: C.teal }}><Pencil size={14} /></button>
                 {!isGerant && <button onClick={() => removeReception(r)} className="smi-btn flex-shrink-0" style={{ color: C.danger }}><Trash2 size={14} /></button>}
@@ -3078,7 +3111,7 @@ function ReceptionView({ db, setDb, profile }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <QrCode value={appUrl} size={64} />
           <div>
-            <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+            <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
             <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
           </div>
         </div>
@@ -3245,14 +3278,1156 @@ function InspectionView({ db, setDb, profile }) {
 
 /* ------------------------------- Dashboard view ----------------------------- */
 
+/* ---------------------------------- Cuves ---------------------------------- */
+
+function JaugeCuve({ pct, statut, height = 96 }) {
+  const color = statut === "critique" ? C.danger : statut === "alerte" ? C.amber : statut === "bon" ? C.teal : C.textFaint;
+  return (
+    <div style={{ width: 54, height, border: `2px solid ${C.border}`, borderRadius: 8, position: "relative", overflow: "hidden", background: C.bgAlt, flexShrink: 0 }}>
+      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: `${pct || 0}%`, background: color, opacity: 0.85, transition: "height .4s" }} />
+      <span className="smi-mono" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", fontSize: 12, fontWeight: 700, color: C.text }}>{pct === null ? "—" : `${pct}%`}</span>
+    </div>
+  );
+}
+
+function CuvesView({ db, setDb, profile }) {
+  const isAdmin = profile.role === "admin";
+  const stations = isAdmin ? db.stations : db.stations.filter((s) => s.id === profile.stationId);
+  const [form, setForm] = useState(null); // null = fermé
+  const [err, setErr] = useState("");
+
+  const etats = useMemo(() => stations.map((s) => ({ station: s, ...etatCuvesStation(db, s.id) })), [db, stations]);
+  const enAlerte = etats.flatMap((e) => e.liste.filter((x) => x.statut === "alerte" || x.statut === "critique").map((x) => ({ ...x, station: e.station })));
+
+  const openNew = (stationId, produit = "essence") => { setErr(""); setForm({ stationId, produit, nom: `Cuve ${produit}`, capacite: "", seuilAlerte: "", seuilCritique: "", emplacement: "" }); };
+  const save = () => {
+    setErr("");
+    if (!form.nom?.trim()) { setErr("Indiquez le nom de la cuve."); return; }
+    if (num(form.capacite) <= 0) { setErr("Indiquez la capacité de la cuve."); return; }
+    if (form.seuilCritique !== "" && form.seuilAlerte !== "" && num(form.seuilCritique) > num(form.seuilAlerte)) { setErr("Le seuil critique doit être inférieur au seuil d'alerte."); return; }
+    const row = { id: form.id || uid(), stationId: form.stationId, nom: form.nom.trim(), produit: form.produit, capacite: form.capacite, seuilAlerte: form.seuilAlerte, seuilCritique: form.seuilCritique, emplacement: (form.emplacement || "").trim() };
+    let next = { ...db, cuves: form.id ? db.cuves.map((c) => (c.id === form.id ? row : c)) : [...(db.cuves || []), row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: row.stationId, entity: "cuve", action: form.id ? "modification" : "création", after: { nom: row.nom, produit: row.produit, capacite: row.capacite } });
+    setDb(next); setForm(null);
+  };
+  const remove = (c) => {
+    if (!confirm(`Supprimer la cuve « ${c.nom} » ? Les relevés et stocks ne sont pas touchés.`)) return;
+    let next = { ...db, cuves: db.cuves.filter((x) => x.id !== c.id) };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: c.stationId, entity: "cuve", action: "suppression", before: { nom: c.nom } });
+    setDb(next);
+  };
+  const inputStyle = { background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Cuves</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Niveau de chaque cuve d'après le dernier contrôle de stock, place libre avant livraison et nombre de jours avant rupture au rythme des 7 derniers jours.</p>
+      </div>
+
+      {enAlerte.length > 0 && (
+        <Card style={{ background: C.dangerSoft, border: `1px solid ${C.danger}` }}>
+          <p className="text-sm font-semibold flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={16} /> {enAlerte.length} cuve{enAlerte.length > 1 ? "s" : ""} à réapprovisionner</p>
+          <ul className="text-xs mt-1 flex flex-col gap-0.5" style={{ color: C.danger }}>
+            {enAlerte.map((x) => <li key={x.cuve.id}>{x.station.nom} — {x.cuve.nom} : {fmtVol(x.niveau)} ({x.pct} %){x.joursRestants !== null ? `, environ ${x.joursRestants.toFixed(1)} j` : ""}{x.statut === "critique" ? " · CRITIQUE" : ""}</li>)}
+          </ul>
+        </Card>
+      )}
+
+      {form && (
+        <Card className="max-w-2xl">
+          <p className="font-semibold mb-3">{form.id ? "Modifier la cuve" : "Nouvelle cuve"} — {db.stations.find((s) => s.id === form.stationId)?.nom}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Nom de la cuve"><input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={inputStyle} value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} /></Field>
+            <Field label="Produit">
+              <SelectInput value={form.produit} onChange={(e) => setForm({ ...form, produit: e.target.value })}>{PRODUITS.map((p) => <option key={p.k} value={p.k}>{p.label}</option>)}</SelectInput>
+            </Field>
+            <Field label="Capacité (L)"><NumberInput value={form.capacite} onChange={(e) => setForm({ ...form, capacite: e.target.value })} /></Field>
+            <Field label="Emplacement (facultatif)"><input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={inputStyle} value={form.emplacement} onChange={(e) => setForm({ ...form, emplacement: e.target.value })} placeholder="ex : îlot A" /></Field>
+            <Field label="Seuil d'alerte (L)" hint="Vide = 25 % de la capacité."><NumberInput value={form.seuilAlerte} onChange={(e) => setForm({ ...form, seuilAlerte: e.target.value })} /></Field>
+            <Field label="Seuil critique (L)" hint="Vide = 10 % de la capacité."><NumberInput value={form.seuilCritique} onChange={(e) => setForm({ ...form, seuilCritique: e.target.value })} /></Field>
+          </div>
+          {err && <p className="text-xs flex items-center gap-1.5 mt-3" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="ghost" onClick={() => setForm(null)}>Annuler</Button>
+            <Button onClick={save}><CheckCircle2 size={16} /> Enregistrer</Button>
+          </div>
+        </Card>
+      )}
+
+      {stations.length === 0 && <EmptyState icon={Droplet} title="Aucune station" hint="Créez d'abord une station dans l'onglet Stations." />}
+
+      {etats.map(({ station, liste, lastDate }) => (
+        <Card key={station.id}>
+          <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <div>
+              <p className="font-semibold">{station.nom}</p>
+              <p className="text-xs" style={{ color: C.textFaint }}>{lastDate ? `Dernier contrôle de stock : ${fmtDateLong(lastDate)}` : "Aucun contrôle de stock saisi"}</p>
+            </div>
+            {isAdmin && <Button variant="ghost" onClick={() => openNew(station.id)}><Plus size={14} /> Cuve</Button>}
+          </div>
+          {liste.length === 0 ? (
+            <div className="text-sm flex flex-col gap-2" style={{ color: C.textMuted }}>
+              <p>Aucune cuve définie pour cette station.</p>
+              {isAdmin && <div className="flex gap-2 flex-wrap"><Button variant="ghost" onClick={() => openNew(station.id, "essence")}>+ Cuve essence</Button><Button variant="ghost" onClick={() => openNew(station.id, "gasoil")}>+ Cuve gasoil</Button></div>}
+            </div>
+          ) : (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {liste.map((x) => {
+                const st = STATUT_CUVE[x.statut];
+                return (
+                  <div key={x.cuve.id} className="rounded-md p-3 flex gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}`, borderLeft: `4px solid ${st.tone === "danger" ? C.danger : st.tone === "amber" ? C.amber : st.tone === "success" ? C.teal : C.border}` }}>
+                    <JaugeCuve pct={x.pct} statut={x.statut} />
+                    <div className="flex-1 min-w-0 text-xs flex flex-col gap-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-semibold text-sm truncate">{x.cuve.nom}</p>
+                        <Pill tone={st.tone}>{st.label}</Pill>
+                      </div>
+                      <p style={{ color: C.textFaint }}>{PRODUITS.find((p) => p.k === x.cuve.produit)?.label}{x.cuve.emplacement ? ` · ${x.cuve.emplacement}` : ""}</p>
+                      <div className="flex justify-between"><span style={{ color: C.textFaint }}>Niveau</span><span className="smi-mono font-semibold">{x.niveau === null ? "—" : fmtVol(x.niveau)} / {fmtVol(x.cap)}</span></div>
+                      <div className="flex justify-between"><span style={{ color: C.textFaint }}>Place libre</span><span className="smi-mono">{x.placeLibre === null ? "—" : fmtVol(x.placeLibre)}</span></div>
+                      <div className="flex justify-between"><span style={{ color: C.textFaint }}>Vente moyenne (7 j)</span><span className="smi-mono">{fmtVol(x.rythme)}/j</span></div>
+                      <div className="flex justify-between"><span style={{ color: C.textFaint }}>Avant rupture</span><span className="smi-mono font-semibold" style={{ color: x.joursRestants !== null && x.joursRestants <= 3 ? C.danger : C.text }}>{x.joursRestants === null ? "—" : `${x.joursRestants.toFixed(1)} j`}</span></div>
+                      {x.ecart !== null && Math.abs(x.ecart) >= 1 && <div className="flex justify-between"><span style={{ color: C.textFaint }}>Écart au dernier jaugeage</span><span className="smi-mono" style={{ color: x.ecart < 0 ? C.danger : C.success }}>{x.ecart > 0 ? "+" : ""}{fmtVol(x.ecart)}</span></div>}
+                      <div className="flex justify-between"><span style={{ color: C.textFaint }}>Seuils alerte / critique</span><span className="smi-mono">{fmtVol(x.alerte)} / {fmtVol(x.critique)}</span></div>
+                      {isAdmin && (
+                        <div className="flex gap-2 mt-1">
+                          <button className="smi-btn flex items-center gap-1" style={{ color: C.textMuted }} onClick={() => { setErr(""); setForm({ ...x.cuve }); }}><Pencil size={12} /> Modifier</button>
+                          <button className="smi-btn flex items-center gap-1" style={{ color: C.danger }} onClick={() => remove(x.cuve)}><Trash2 size={12} /> Supprimer</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+/* ----------------------- Fournisseurs, dépenses, résultat ----------------------- */
+
+const DEPENSE_CATEGORIES = ["Salaires", "Électricité", "Eau", "Loyer", "Maintenance", "Transport", "Sécurité", "Fournitures", "Taxes et impôts", "Communication", "Frais bancaires", "Carburant (usage interne)", "Autre"];
+const MODES_PAIEMENT = ["Espèces", "Mobile money", "Virement", "Chèque", "Autre"];
+
+// Montant dû pour une livraison : quantité × prix d'achat (ou, à défaut, le prix de cession
+// fixé pour la station dans son Compte station).
+const compteStation = (db, stationId) => (db.comptesStations || []).find((c) => c.stationId === stationId) || null;
+const prixCessionDefaut = (db, stationId, produit) => { const c = compteStation(db, stationId); return c ? num(produit === "essence" ? c.prixCessionE : c.prixCessionG) : 0; };
+const prixLivraison = (db, r) => num(r.prixAchat) > 0 ? num(r.prixAchat) : prixCessionDefaut(db, r.stationId, r.produit);
+const montantReception = (r, db) => num(r.quantite) * (db ? prixLivraison(db, r) : num(r.prixAchat));
+
+// Ce que la société doit encore au fournisseur : solde de départ + livraisons non payées
+// − paiements enregistrés après coup.
+function soldeFournisseur(db, f) {
+  // Stations dont les versements paient ce fournisseur : leur dette est le « reste à verser »
+  // du Compte station, pas le détail des livraisons.
+  const liees = (db.comptesStations || []).filter((c) => c.fournisseurId === f.id).map((c) => c.stationId);
+  const resteLiees = liees.reduce((a, sid) => a + Math.max(0, calcCompteStation(db, sid)?.reste || 0), 0);
+  const livraisons = db.receptions.filter((r) => r.fournisseurId === f.id && !liees.includes(r.stationId));
+  const du = livraisons.reduce((a, r) => a + montantReception(r, db) - num(r.montantPaye), 0);
+  const paye = (db.paiementsFournisseurs || []).filter((p) => p.fournisseurId === f.id).reduce((a, p) => a + num(p.montant), 0);
+  return num(f.soldeInitial) + du - paye + resteLiees;
+}
+
+// Prix d'achat moyen pondéré d'un produit pour une station, sur toutes les livraisons
+// chiffrées jusqu'à une date. Sert à estimer le coût du carburant vendu.
+function prixAchatMoyen(db, stationId, produit, jusquA) {
+  const chiffrees = db.receptions.filter((r) => r.stationId === stationId && r.produit === produit && num(r.prixAchat) > 0);
+  const l = chiffrees.filter((r) => r.date <= jusquA);
+  const q = l.reduce((a, r) => a + num(r.quantite), 0);
+  if (q > 0) return l.reduce((a, r) => a + montantReception(r), 0) / q;
+  // Carburant vendu avant la première livraison chiffrée (stock de départ) : on retient
+  // le prix de cette première livraison plutôt qu'un coût nul.
+  const premiere = chiffrees.sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+  if (premiere) return num(premiere.prixAchat);
+  const pc = prixCessionDefaut(db, stationId, produit);
+  return pc > 0 ? pc : null;
+}
+
+function exportCsv(nom, entetes, lignes) {
+  const csv = [entetes, ...lignes].map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(";")).join("\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `${nom}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const inputCls = "smi-input w-full rounded-md px-3 py-2 text-sm";
+const inputSty = () => ({ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text });
+
+function FournisseursView({ db, setDb, profile }) {
+  const [form, setForm] = useState(null);
+  const [payFor, setPayFor] = useState(null); // { fournisseurId, date, montant, mode, stationId, note }
+  const [openId, setOpenId] = useState(null);
+  const [err, setErr] = useState("");
+  const list = db.fournisseurs || [];
+  const totalDu = list.reduce((a, f) => a + Math.max(0, soldeFournisseur(db, f)), 0);
+
+  const save = () => {
+    setErr("");
+    if (!form.nom?.trim()) { setErr("Indiquez le nom du fournisseur."); return; }
+    const row = { id: form.id || uid(), nom: form.nom.trim(), contact: (form.contact || "").trim(), telephone: (form.telephone || "").trim(), adresse: (form.adresse || "").trim(), produits: (form.produits || "").trim(), delaiPaiement: form.delaiPaiement || "", soldeInitial: form.soldeInitial || "" };
+    let next = { ...db, fournisseurs: form.id ? list.map((f) => (f.id === form.id ? row : f)) : [...list, row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, entity: "fournisseur", action: form.id ? "modification" : "création", after: { nom: row.nom } });
+    setDb(next); setForm(null);
+  };
+  const remove = (f) => {
+    if (db.receptions.some((r) => r.fournisseurId === f.id) || (db.paiementsFournisseurs || []).some((p) => p.fournisseurId === f.id)) { alert("Ce fournisseur a des livraisons ou des paiements : suppression impossible."); return; }
+    if (!confirm(`Supprimer le fournisseur « ${f.nom} » ?`)) return;
+    setDb(withAudit({ ...db, fournisseurs: list.filter((x) => x.id !== f.id) }, { user: profile?.name, role: profile?.role, entity: "fournisseur", action: "suppression", before: { nom: f.nom } }));
+  };
+  const savePay = () => {
+    setErr("");
+    const f = list.find((x) => x.id === payFor.fournisseurId);
+    if (num(payFor.montant) <= 0) { setErr("Indiquez le montant payé."); return; }
+    if (isFutureDate(payFor.date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const row = { id: uid(), fournisseurId: f.id, stationId: payFor.stationId || "", date: payFor.date, montant: payFor.montant, mode: payFor.mode, note: (payFor.note || "").trim(), timestamp: new Date().toISOString() };
+    setDb(withAudit({ ...db, paiementsFournisseurs: [...(db.paiementsFournisseurs || []), row] }, { user: profile?.name, role: profile?.role, entity: "paiement fournisseur", action: "création", after: { fournisseur: f.nom, montant: row.montant } }));
+    setPayFor(null);
+  };
+  const removePay = (p) => {
+    if (!confirm("Supprimer ce paiement ?")) return;
+    setDb(withAudit({ ...db, paiementsFournisseurs: db.paiementsFournisseurs.filter((x) => x.id !== p.id) }, { user: profile?.name, role: profile?.role, entity: "paiement fournisseur", action: "suppression", before: { montant: p.montant } }));
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="smi-display text-2xl">Fournisseurs</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Ce que vous devez à chaque fournisseur : livraisons chiffrées dans Réception (prix d'achat − payé à la livraison) moins les paiements enregistrés ici.</p>
+        </div>
+        <Button onClick={() => { setErr(""); setForm({ nom: "", contact: "", telephone: "", adresse: "", produits: "Essence, Gasoil", delaiPaiement: "", soldeInitial: "" }); }}><Plus size={16} /> Fournisseur</Button>
+      </div>
+
+      <Card className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="text-sm" style={{ color: C.textMuted }}>Total dû à l'ensemble des fournisseurs</span>
+        <GaugeNumber value={fmtMontant(totalDu)} tone={totalDu > 0 ? "danger" : "muted"} size="lg" />
+      </Card>
+
+      {form && (
+        <Card className="max-w-2xl">
+          <p className="font-semibold mb-3">{form.id ? "Modifier le fournisseur" : "Nouveau fournisseur"}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Nom"><input className={inputCls} style={inputSty()} value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} /></Field>
+            <Field label="Contact"><input className={inputCls} style={inputSty()} value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} /></Field>
+            <Field label="Téléphone"><input className={inputCls} style={inputSty()} value={form.telephone} onChange={(e) => setForm({ ...form, telephone: e.target.value })} /></Field>
+            <Field label="Adresse"><input className={inputCls} style={inputSty()} value={form.adresse} onChange={(e) => setForm({ ...form, adresse: e.target.value })} /></Field>
+            <Field label="Produits"><input className={inputCls} style={inputSty()} value={form.produits} onChange={(e) => setForm({ ...form, produits: e.target.value })} /></Field>
+            <Field label="Délai de paiement (jours)"><NumberInput value={form.delaiPaiement} onChange={(e) => setForm({ ...form, delaiPaiement: e.target.value })} /></Field>
+            <Field label="Solde de départ dû" hint="Ce que vous lui deviez déjà avant d'utiliser l'application."><NumberInput value={form.soldeInitial} onChange={(e) => setForm({ ...form, soldeInitial: e.target.value })} /></Field>
+          </div>
+          {err && <p className="text-xs flex items-center gap-1.5 mt-3" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+          <div className="flex justify-end gap-2 mt-4"><Button variant="ghost" onClick={() => setForm(null)}>Annuler</Button><Button onClick={save}><CheckCircle2 size={16} /> Enregistrer</Button></div>
+        </Card>
+      )}
+
+      {list.length === 0 && !form && <EmptyState icon={Truck} title="Aucun fournisseur" hint="Ajoutez vos fournisseurs, puis choisissez-les lors de chaque Réception avec le prix d'achat." />}
+
+      <div className="grid md:grid-cols-2 gap-3">
+        {list.map((f) => {
+          const solde = soldeFournisseur(db, f);
+          const livs = db.receptions.filter((r) => r.fournisseurId === f.id).sort((a, b) => (a.date < b.date ? 1 : -1));
+          const pays = (db.paiementsFournisseurs || []).filter((p) => p.fournisseurId === f.id).sort((a, b) => (a.date < b.date ? 1 : -1));
+          return (
+            <Card key={f.id} className="flex flex-col gap-2">
+              <div className="flex items-start justify-between gap-2">
+                <div><p className="font-semibold">{f.nom}</p><p className="text-xs" style={{ color: C.textFaint }}>{[f.contact, f.telephone].filter(Boolean).join(" · ") || "—"}</p></div>
+                <Pill tone={solde > 0 ? "danger" : "success"}>{solde > 0 ? "Dette" : "À jour"}</Pill>
+              </div>
+              <p className="text-xs" style={{ color: C.textMuted }}>{f.produits || "—"}{f.delaiPaiement ? ` · paiement à ${f.delaiPaiement} jours` : ""}</p>
+              <div className="flex items-center justify-between"><span className="text-xs" style={{ color: C.textFaint }}>Solde dû</span><GaugeNumber value={fmtMontant(solde)} tone={solde > 0 ? "danger" : "muted"} /></div>
+              <p className="text-xs" style={{ color: C.textFaint }}>{livs.length} livraison(s) · {pays.length} paiement(s)</p>
+              <div className="flex gap-2 flex-wrap">
+                <Button onClick={() => { setErr(""); setPayFor({ fournisseurId: f.id, date: todayISO(), montant: solde > 0 ? String(Math.round(solde)) : "", mode: "Virement", stationId: "", note: "" }); }} disabled={solde <= 0}>Payer</Button>
+                <Button variant="ghost" onClick={() => setOpenId(openId === f.id ? null : f.id)}>{openId === f.id ? "Masquer" : "Détail"}</Button>
+                <Button variant="ghost" onClick={() => { setErr(""); setForm({ ...f }); }}><Pencil size={14} /></Button>
+                <Button variant="ghost" onClick={() => remove(f)}><Trash2 size={14} /></Button>
+              </div>
+              {payFor?.fournisseurId === f.id && (
+                <div className="rounded-md p-3 flex flex-col gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Date"><TextInput type="date" value={payFor.date} max={todayISO()} onChange={(e) => setPayFor({ ...payFor, date: e.target.value })} /></Field>
+                    <Field label="Montant"><NumberInput value={payFor.montant} onChange={(e) => setPayFor({ ...payFor, montant: e.target.value })} /></Field>
+                    <Field label="Mode"><SelectInput value={payFor.mode} onChange={(e) => setPayFor({ ...payFor, mode: e.target.value })}>{MODES_PAIEMENT.map((m) => <option key={m}>{m}</option>)}</SelectInput></Field>
+                    <Field label="Payé par la station"><SelectInput value={payFor.stationId} onChange={(e) => setPayFor({ ...payFor, stationId: e.target.value })}><option value="">Direction / siège</option>{db.stations.map((s) => <option key={s.id} value={s.id}>{s.nom}</option>)}</SelectInput></Field>
+                  </div>
+                  <Field label="Note"><input className={inputCls} style={inputSty()} value={payFor.note} onChange={(e) => setPayFor({ ...payFor, note: e.target.value })} placeholder="ex : n° de virement" /></Field>
+                  {err && <p className="text-xs" style={{ color: C.danger }}>{err}</p>}
+                  <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setPayFor(null)}>Annuler</Button><Button onClick={savePay}>Enregistrer le paiement</Button></div>
+                </div>
+              )}
+              {openId === f.id && (
+                <div className="text-xs flex flex-col gap-1 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+                  {livs.map((r) => <div key={r.id} className="flex justify-between gap-2"><span>{fmtDateLong(r.date)} · {db.stations.find((s) => s.id === r.stationId)?.nom || "—"} · {r.produit} {fmtVol(r.quantite)}</span><span className="smi-mono">{num(r.prixAchat) > 0 ? `${fmtMontant(montantReception(r))} (payé ${fmtMontant(r.montantPaye)})` : "prix non saisi"}</span></div>)}
+                  {pays.map((p) => <div key={p.id} className="flex justify-between gap-2" style={{ color: C.success }}><span>{fmtDateLong(p.date)} · paiement {p.mode}{p.note ? ` · ${p.note}` : ""}</span><span className="smi-mono flex items-center gap-2">− {fmtMontant(p.montant)}<button className="smi-btn" style={{ color: C.danger }} onClick={() => removePay(p)}><Trash2 size={12} /></button></span></div>)}
+                  {livs.length + pays.length === 0 && <span style={{ color: C.textFaint }}>Aucun mouvement.</span>}
+                </div>
+              )}
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DepensesView({ db, setDb, profile }) {
+  const isAdmin = profile.role === "admin";
+  const isGerant = profile.role === "gerant";
+  const vide = () => ({ stationId: isGerant ? profile.stationId : (db.stations[0]?.id || ""), date: todayISO(), categorie: DEPENSE_CATEGORIES[0], montant: "", beneficiaire: "", description: "", mode: "Espèces", payeeParCaisse: true });
+  const [form, setForm] = useState(null);
+  const [err, setErr] = useState("");
+  const [fStation, setFStation] = useState(isGerant ? profile.stationId : "");
+  const [fCat, setFCat] = useState("");
+  const [fStatut, setFStatut] = useState("");
+  const [fMois, setFMois] = useState(todayISO().slice(0, 7));
+
+  const all = (db.depenses || []).filter((d) => (isGerant ? d.stationId === profile.stationId : true));
+  const rows = all.filter((d) => (!fStation || d.stationId === fStation) && (!fCat || d.categorie === fCat) && (!fStatut || d.statut === fStatut) && (!fMois || d.date.startsWith(fMois))).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const valides = rows.filter((d) => d.statut === "validee");
+  const parCat = {};
+  valides.forEach((d) => { parCat[d.categorie] = (parCat[d.categorie] || 0) + num(d.montant); });
+  const enAttente = all.filter((d) => d.statut === "en_attente");
+
+  const save = () => {
+    setErr("");
+    if (!form.stationId) { setErr("Choisissez une station."); return; }
+    if (num(form.montant) <= 0) { setErr("Indiquez le montant."); return; }
+    if (isFutureDate(form.date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const existing = form.id ? all.find((d) => d.id === form.id) : null;
+    const row = {
+      id: form.id || uid(), stationId: isGerant ? profile.stationId : form.stationId, date: form.date, categorie: form.categorie, montant: form.montant,
+      beneficiaire: (form.beneficiaire || "").trim(), description: (form.description || "").trim(), mode: form.mode,
+      payeeParCaisse: form.mode === "Espèces" && !!form.payeeParCaisse,
+      // Saisie d'un gérant : en attente de validation. Saisie de l'administrateur : validée.
+      statut: existing ? (isAdmin ? existing.statut : "en_attente") : (isAdmin ? "validee" : "en_attente"),
+      creePar: existing?.creePar || profile.name, validePar: isAdmin ? (existing?.validePar || profile.name) : "",
+      timestamp: existing?.timestamp || new Date().toISOString(),
+    };
+    let next = { ...db, depenses: existing ? db.depenses.map((d) => (d.id === row.id ? row : d)) : [...(db.depenses || []), row] };
+    next = withAudit(next, { user: profile?.name, role: profile?.role, stationId: row.stationId, entity: "dépense", action: existing ? "modification" : "création", after: { categorie: row.categorie, montant: row.montant, statut: row.statut } });
+    setDb(next); setForm(null);
+  };
+  const setStatut = (d, statut) => {
+    setDb(withAudit({ ...db, depenses: db.depenses.map((x) => (x.id === d.id ? { ...x, statut, validePar: profile.name } : x)) }, { user: profile?.name, role: profile?.role, stationId: d.stationId, entity: "dépense", action: statut === "validee" ? "validation" : "refus", after: { montant: d.montant, categorie: d.categorie } }));
+  };
+  const remove = (d) => {
+    if (!confirm("Supprimer cette dépense ?")) return;
+    setDb(withAudit({ ...db, depenses: db.depenses.filter((x) => x.id !== d.id) }, { user: profile?.name, role: profile?.role, stationId: d.stationId, entity: "dépense", action: "suppression", before: { montant: d.montant, categorie: d.categorie } }));
+  };
+  const statutPill = (st) => st === "validee" ? <Pill tone="success">Validée</Pill> : st === "refusee" ? <Pill tone="danger">Refusée</Pill> : <Pill tone="amber">En attente</Pill>;
+  const stNom = (id) => db.stations.find((s) => s.id === id)?.nom || "—";
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="smi-display text-2xl">Dépenses</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>{isAdmin ? "Dépenses des stations par catégorie. Celles saisies par un gérant attendent votre validation." : "Saisissez les dépenses de votre station : l'administrateur les valide."} Une dépense payée en espèces par la caisse est déduite de la caisse attendue du jour.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="ghost" disabled={rows.length === 0} onClick={() => exportCsv(`depenses-${fMois || "toutes"}`, ["Date", "Station", "Catégorie", "Bénéficiaire", "Description", "Mode", "Payée par la caisse", "Montant", "Statut", "Saisie par"], rows.map((d) => [d.date, stNom(d.stationId), d.categorie, d.beneficiaire, d.description, d.mode, d.payeeParCaisse ? "oui" : "non", num(d.montant), d.statut, d.creePar]))}><Download size={16} /> CSV</Button>
+          <Button onClick={() => { setErr(""); setForm(vide()); }}><Plus size={16} /> Dépense</Button>
+        </div>
+      </div>
+
+      {isAdmin && enAttente.length > 0 && (
+        <Card style={{ background: C.amberSoft, border: `1px solid ${C.amber}` }}>
+          <p className="text-sm font-semibold" style={{ color: C.amber }}>{enAttente.length} dépense{enAttente.length > 1 ? "s" : ""} en attente de validation</p>
+        </Card>
+      )}
+
+      {form && (
+        <Card className="max-w-2xl">
+          <p className="font-semibold mb-3">{form.id ? "Modifier la dépense" : "Nouvelle dépense"}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Station"><StationSelect stations={db.stations} value={form.stationId} onChange={(v) => setForm({ ...form, stationId: v })} disabled={isGerant} /></Field>
+            <Field label="Date"><TextInput type="date" value={form.date} max={todayISO()} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+            <Field label="Catégorie"><SelectInput value={form.categorie} onChange={(e) => setForm({ ...form, categorie: e.target.value })}>{DEPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</SelectInput></Field>
+            <Field label="Montant"><NumberInput value={form.montant} onChange={(e) => setForm({ ...form, montant: e.target.value })} /></Field>
+            <Field label="Bénéficiaire"><input className={inputCls} style={inputSty()} value={form.beneficiaire} onChange={(e) => setForm({ ...form, beneficiaire: e.target.value })} /></Field>
+            <Field label="Mode de paiement"><SelectInput value={form.mode} onChange={(e) => setForm({ ...form, mode: e.target.value })}>{MODES_PAIEMENT.map((m) => <option key={m}>{m}</option>)}</SelectInput></Field>
+          </div>
+          <div className="mt-3"><Field label="Description"><input className={inputCls} style={inputSty()} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field></div>
+          {form.mode === "Espèces" && (
+            <label className="flex items-center gap-2 text-sm mt-3"><input type="checkbox" checked={!!form.payeeParCaisse} onChange={(e) => setForm({ ...form, payeeParCaisse: e.target.checked })} /> Payée avec l'argent de la caisse de la station</label>
+          )}
+          {err && <p className="text-xs flex items-center gap-1.5 mt-3" style={{ color: C.danger }}><AlertTriangle size={13} /> {err}</p>}
+          <div className="flex justify-end gap-2 mt-4"><Button variant="ghost" onClick={() => setForm(null)}>Annuler</Button><Button onClick={save}><CheckCircle2 size={16} /> Enregistrer</Button></div>
+        </Card>
+      )}
+
+      <Card>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Field label="Mois"><TextInput type="month" value={fMois} onChange={(e) => setFMois(e.target.value)} /></Field>
+          {!isGerant && <Field label="Station"><SelectInput value={fStation} onChange={(e) => setFStation(e.target.value)}><option value="">Toutes</option>{db.stations.map((s) => <option key={s.id} value={s.id}>{s.nom}</option>)}</SelectInput></Field>}
+          <Field label="Catégorie"><SelectInput value={fCat} onChange={(e) => setFCat(e.target.value)}><option value="">Toutes</option>{DEPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</SelectInput></Field>
+          <Field label="Statut"><SelectInput value={fStatut} onChange={(e) => setFStatut(e.target.value)}><option value="">Tous</option><option value="validee">Validée</option><option value="en_attente">En attente</option><option value="refusee">Refusée</option></SelectInput></Field>
+        </div>
+        <div className="flex flex-wrap gap-3 mt-3 items-center">
+          <span className="text-sm" style={{ color: C.textMuted }}>Total validé</span>
+          <GaugeNumber value={fmtMontant(valides.reduce((a, d) => a + num(d.montant), 0))} tone="amber" />
+          {Object.entries(parCat).sort((a, b) => b[1] - a[1]).map(([c, m]) => <Pill key={c}>{c} : {fmtMontant(m)}</Pill>)}
+        </div>
+      </Card>
+
+      {rows.length === 0 ? <EmptyState icon={Wallet} title="Aucune dépense" hint="Aucune dépense pour ces filtres." /> : (
+        <div className="flex flex-col gap-2">
+          {rows.map((d) => (
+            <div key={d.id} className="rounded-md p-3 flex items-center gap-3 flex-wrap" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium">{d.categorie} — <span className="smi-mono">{fmtMontant(d.montant)}</span></p>
+                <p className="text-xs" style={{ color: C.textFaint }}>{fmtDateLong(d.date)} · {stNom(d.stationId)} · {d.mode}{d.payeeParCaisse ? " (caisse)" : ""}{d.beneficiaire ? ` · ${d.beneficiaire}` : ""}{d.description ? ` · ${d.description}` : ""} · saisie par {d.creePar || "—"}</p>
+              </div>
+              {statutPill(d.statut)}
+              {isAdmin && d.statut === "en_attente" && <><Button onClick={() => setStatut(d, "validee")}>Valider</Button><Button variant="ghost" onClick={() => setStatut(d, "refusee")}>Refuser</Button></>}
+              {(isAdmin || d.statut === "en_attente") && <button className="smi-btn" style={{ color: C.teal }} onClick={() => { setErr(""); setForm({ ...d }); }}><Pencil size={14} /></button>}
+              {isAdmin && <button className="smi-btn" style={{ color: C.danger }} onClick={() => remove(d)}><Trash2 size={14} /></button>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Résultat d'une période, station par station : chiffre d'affaires (relevés × prix de vente),
+// coût du carburant vendu (litres × prix d'achat moyen des livraisons), dépenses validées.
+function ResultatView({ db }) {
+  const premier = todayISO().slice(0, 8) + "01";
+  const [du, setDu] = useState(premier);
+  const [au, setAu] = useState(todayISO());
+  const [stationId, setStationId] = useState("");
+
+  const calc = useMemo(() => {
+    const stations = db.stations.filter((s) => !stationId || s.id === stationId);
+    const lignes = stations.map((s) => {
+      const dates = [...new Set(db.releves.filter((r) => r.stationId === s.id && r.date >= du && r.date <= au).map((r) => r.date))];
+      let ca = 0, lE = 0, lG = 0;
+      dates.forEach((d) => { const v = computeVente(db.releves, db.ventes, s.id, d); ca += v.ca; lE += v.essence; lG += v.gasoil; });
+      const pE = prixAchatMoyen(db, s.id, "essence", au), pG = prixAchatMoyen(db, s.id, "gasoil", au);
+      const coutManquant = (lE > 0 && pE === null) || (lG > 0 && pG === null);
+      const cout = lE * (pE || 0) + lG * (pG || 0);
+      const deps = (db.depenses || []).filter((d) => d.stationId === s.id && d.statut === "validee" && d.date >= du && d.date <= au);
+      const depenses = deps.reduce((a, d) => a + num(d.montant), 0);
+      const achats = db.receptions.filter((r) => r.stationId === s.id && r.date >= du && r.date <= au).reduce((a, r) => a + montantReception(r, db), 0);
+      const bons = (db.bons || []).filter((b) => b.stationId === s.id && b.date >= du && b.date <= au).reduce((a, b) => a + bonTotal(b), 0);
+      const parCat = {};
+      deps.forEach((d) => { parCat[d.categorie] = (parCat[d.categorie] || 0) + num(d.montant); });
+      return { station: s, ca, lE, lG, pE, pG, cout, coutManquant, marge: ca - cout, depenses, resultat: ca - cout - depenses, achats, bons, parCat, devise: s.devise || "GNF" };
+    });
+    const tot = lignes.reduce((a, l) => ({ ca: a.ca + l.ca, cout: a.cout + l.cout, marge: a.marge + l.marge, depenses: a.depenses + l.depenses, resultat: a.resultat + l.resultat, achats: a.achats + l.achats, bons: a.bons + l.bons }), { ca: 0, cout: 0, marge: 0, depenses: 0, resultat: 0, achats: 0, bons: 0 });
+    const parCat = {};
+    lignes.forEach((l) => Object.entries(l.parCat).forEach(([c, m]) => { parCat[c] = (parCat[c] || 0) + m; }));
+    return { lignes, tot, parCat };
+  }, [db, du, au, stationId]);
+
+  const dettes = (db.fournisseurs || []).reduce((a, f) => a + Math.max(0, soldeFournisseur(db, f)), 0);
+  const manque = calc.lignes.some((l) => l.coutManquant);
+  const row = (label, v, opts = {}) => (
+    <div className="flex items-center justify-between gap-3 py-1.5" style={{ borderTop: opts.top ? `1px solid ${C.border}` : undefined }}>
+      <span className="text-sm" style={{ color: opts.muted ? C.textFaint : C.text, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
+      <span className="smi-mono text-sm" style={{ fontWeight: opts.bold ? 700 : 500, color: opts.color || C.text }}>{v}</span>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap smi-no-print">
+        <div>
+          <h2 className="smi-display text-2xl">Résultat</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Ventes − coût du carburant vendu − dépenses validées, sur la période choisie.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={() => exportCsv(`resultat-${du}-${au}`, ["Station", "Litres essence", "Litres gasoil", "Chiffre d'affaires", "Prix d'achat moyen essence", "Prix d'achat moyen gasoil", "Coût du carburant vendu", "Marge brute", "Dépenses", "Résultat", "Achats de la période", "Bons"], calc.lignes.map((l) => [l.station.nom, l.lE, l.lG, Math.round(l.ca), l.pE ? Math.round(l.pE) : "", l.pG ? Math.round(l.pG) : "", Math.round(l.cout), Math.round(l.marge), Math.round(l.depenses), Math.round(l.resultat), Math.round(l.achats), Math.round(l.bons)]))}><Download size={16} /> CSV</Button>
+          <Button variant="ghost" onClick={() => window.print()}><Printer size={16} /> PDF</Button>
+        </div>
+      </div>
+
+      <Card className="smi-no-print">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Field label="Du"><TextInput type="date" value={du} onChange={(e) => setDu(e.target.value)} /></Field>
+          <Field label="Au"><TextInput type="date" value={au} onChange={(e) => setAu(e.target.value)} /></Field>
+          <Field label="Station"><SelectInput value={stationId} onChange={(e) => setStationId(e.target.value)}><option value="">Toutes</option>{db.stations.map((s) => <option key={s.id} value={s.id}>{s.nom}</option>)}</SelectInput></Field>
+          <div className="flex items-end gap-1 flex-wrap">
+            {[["Ce mois", premier, todayISO()], ["30 jours", new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10), todayISO()], ["Cette année", todayISO().slice(0, 4) + "-01-01", todayISO()]].map(([l, a, b]) => <Button key={l} variant="ghost" onClick={() => { setDu(a); setAu(b); }}>{l}</Button>)}
+          </div>
+        </div>
+      </Card>
+
+      <div className="hidden smi-print-only mb-1">
+        <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Résultat du {fmtDateLong(du)} au {fmtDateLong(au)}</h1>
+      </div>
+
+      {manque && (
+        <Card style={{ background: C.amberSoft, border: `1px solid ${C.amber}` }}>
+          <p className="text-sm" style={{ color: C.amber }}>Prix d'achat manquant pour certaines stations : saisissez le prix d'achat dans Réception pour que le coût du carburant vendu (et donc la marge) soit juste.</p>
+        </Card>
+      )}
+
+      <div className="grid md:grid-cols-2 gap-3">
+        <Card>
+          <p className="font-semibold mb-2">{stationId ? db.stations.find((s) => s.id === stationId)?.nom : "Toutes les stations"}</p>
+          {row("Chiffre d'affaires", fmtMontant(calc.tot.ca))}
+          {row("− Coût du carburant vendu", fmtMontant(calc.tot.cout))}
+          {row("= Marge brute", fmtMontant(calc.tot.marge), { bold: true, top: true })}
+          {row("− Dépenses validées", fmtMontant(calc.tot.depenses))}
+          {row("= Résultat", fmtMontant(calc.tot.resultat), { bold: true, top: true, color: calc.tot.resultat < 0 ? C.danger : C.success })}
+          <div className="mt-2" />
+          {row("Achats de carburant de la période", fmtMontant(calc.tot.achats), { muted: true })}
+          {row("Bons de la période (non déduits)", fmtMontant(calc.tot.bons), { muted: true })}
+          {row("Dettes fournisseurs (aujourd'hui)", fmtMontant(dettes), { muted: true, color: dettes > 0 ? C.danger : undefined })}
+        </Card>
+        <Card>
+          <p className="font-semibold mb-2">Dépenses par catégorie</p>
+          {Object.keys(calc.parCat).length === 0 ? <p className="text-sm" style={{ color: C.textFaint }}>Aucune dépense validée sur la période.</p>
+            : Object.entries(calc.parCat).sort((a, b) => b[1] - a[1]).map(([c, m]) => <div key={c}>{row(c, fmtMontant(m))}</div>)}
+        </Card>
+      </div>
+
+      {!stationId && calc.lignes.length > 1 && (
+        <Card>
+          <p className="font-semibold mb-2">Par station</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr style={{ color: C.textMuted }}><th className="text-left py-1.5 pr-3">Station</th><th className="text-right pr-3">Litres vendus</th><th className="text-right pr-3">Chiffre d'affaires</th><th className="text-right pr-3">Coût carburant</th><th className="text-right pr-3">Marge brute</th><th className="text-right pr-3">Dépenses</th><th className="text-right">Résultat</th></tr></thead>
+              <tbody>
+                {calc.lignes.map((l) => (
+                  <tr key={l.station.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td className="py-1.5 pr-3">{l.station.nom}{l.coutManquant && <span style={{ color: C.amber }}> *</span>}</td>
+                    <td className="text-right pr-3 smi-mono">{fmtVol(l.lE + l.lG)}</td>
+                    <td className="text-right pr-3 smi-mono">{fmtMontant(l.ca, l.devise)}</td>
+                    <td className="text-right pr-3 smi-mono">{fmtMontant(l.cout, l.devise)}</td>
+                    <td className="text-right pr-3 smi-mono">{fmtMontant(l.marge, l.devise)}</td>
+                    <td className="text-right pr-3 smi-mono">{fmtMontant(l.depenses, l.devise)}</td>
+                    <td className="text-right smi-mono font-semibold" style={{ color: l.resultat < 0 ? C.danger : C.success }}>{fmtMontant(l.resultat, l.devise)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {manque && <p className="text-xs mt-2" style={{ color: C.amber }}>* prix d'achat manquant : coût du carburant incomplet.</p>}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------ Clients à crédit ------------------------------ */
+
+const bonsClient = (db, clientId) => (db.bons || []).filter((b) => b.clientId === clientId);
+const reglementsClient = (db, clientId) => (db.reglementsClients || []).filter((r) => r.clientId === clientId);
+function soldeClient(db, c) {
+  return num(c.soldeInitial) + bonsClient(db, c.id).reduce((a, b) => a + bonTotal(b), 0) - reglementsClient(db, c.id).reduce((a, r) => a + num(r.montant), 0);
+}
+const parametresSociete = (db) => (db.parametres || []).find((x) => x.id === "societe") || {};
+
+function ClientsView({ db, setDb, profile }) {
+  const isAdmin = profile.role === "admin";
+  const clients = db.clients || [];
+  const [form, setForm] = useState(null);
+  const [reg, setReg] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [facture, setFacture] = useState(null); // { client, du, au, numero, date, lignes, reglements }
+  const [periode, setPeriode] = useState({ du: todayISO().slice(0, 8) + "01", au: todayISO() });
+  const [showParams, setShowParams] = useState(false);
+  const [params, setParams] = useState(() => ({ adresse: "", telephone: "", email: "", identifiant: "", mentions: "Paiement à réception de facture.", ...parametresSociete(db) }));
+  const [err, setErr] = useState("");
+  const stNom = (id) => db.stations.find((x) => x.id === id)?.nom || "—";
+
+  const totalCreances = clients.reduce((a, c) => a + Math.max(0, soldeClient(db, c)), 0);
+
+  const saveClient = () => {
+    setErr("");
+    if (!form.nom?.trim()) { setErr("Indiquez le nom du client."); return; }
+    const row = { id: form.id || uid(), nom: form.nom.trim(), contact: (form.contact || "").trim(), telephone: (form.telephone || "").trim(), adresse: (form.adresse || "").trim(), plafond: form.plafond || "", soldeInitial: form.soldeInitial || "", delaiPaiement: form.delaiPaiement || "" };
+    setDb(withAudit({ ...db, clients: form.id ? clients.map((c) => (c.id === row.id ? row : c)) : [...clients, row] }, { user: profile?.name, role: profile?.role, entity: "client", action: form.id ? "modification" : "création", after: { nom: row.nom, plafond: row.plafond } }));
+    setForm(null);
+  };
+  const removeClient = (c) => {
+    if (bonsClient(db, c.id).length || reglementsClient(db, c.id).length) { alert("Ce client a des bons ou des règlements : suppression impossible."); return; }
+    if (!confirm(`Supprimer le client « ${c.nom} » ?`)) return;
+    setDb(withAudit({ ...db, clients: clients.filter((x) => x.id !== c.id) }, { user: profile?.name, role: profile?.role, entity: "client", action: "suppression", before: { nom: c.nom } }));
+  };
+  const saveReg = () => {
+    setErr("");
+    if (num(reg.montant) <= 0) { setErr("Indiquez le montant reçu."); return; }
+    if (isFutureDate(reg.date)) { setErr("La date ne peut pas être dans le futur."); return; }
+    const stationId = isAdmin ? reg.stationId : profile.stationId;
+    if (reg.encaisseEnCaisse && !stationId) { setErr("Choisissez la station qui a reçu l'argent."); return; }
+    const row = { id: uid(), clientId: reg.clientId, date: reg.date, montant: reg.montant, mode: reg.mode, stationId: stationId || "", encaisseEnCaisse: reg.mode === "Espèces" && !!reg.encaisseEnCaisse && !!stationId, note: (reg.note || "").trim(), saisiPar: profile.name, timestamp: new Date().toISOString() };
+    setDb(withAudit({ ...db, reglementsClients: [...(db.reglementsClients || []), row] }, { user: profile?.name, role: profile?.role, stationId: row.stationId || null, entity: "règlement client", action: "création", after: { client: clients.find((c) => c.id === row.clientId)?.nom, montant: row.montant } }));
+    setReg(null);
+  };
+  const removeReg = (r) => {
+    if (!confirm("Supprimer ce règlement ?")) return;
+    setDb(withAudit({ ...db, reglementsClients: db.reglementsClients.filter((x) => x.id !== r.id) }, { user: profile?.name, role: profile?.role, entity: "règlement client", action: "suppression", before: { montant: r.montant } }));
+  };
+  const saveParams = () => {
+    const row = { ...params, id: "societe" };
+    setDb({ ...db, parametres: [...(db.parametres || []).filter((x) => x.id !== "societe"), row] });
+    setShowParams(false);
+  };
+
+  // Facture d'une période : tous les bons à crédit du client sur la période, numérotée et
+  // enregistrée (pour garder une suite de numéros sans trou).
+  const emettreFacture = (c) => {
+    const lignes = bonsClient(db, c.id).filter((b) => b.date >= periode.du && b.date <= periode.au).sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (!lignes.length) { alert("Aucun bon à crédit pour ce client sur cette période."); return; }
+    const annee = todayISO().slice(0, 4);
+    const n = (db.factures || []).filter((f) => f.numero.startsWith(`FAC-${annee}-`)).length + 1;
+    const f = { id: uid(), numero: `FAC-${annee}-${String(n).padStart(4, "0")}`, clientId: c.id, date: todayISO(), du: periode.du, au: periode.au, montant: lignes.reduce((a, b) => a + bonTotal(b), 0), emisePar: profile.name };
+    setDb(withAudit({ ...db, factures: [...(db.factures || []), f] }, { user: profile?.name, role: profile?.role, entity: "facture", action: "émission", after: { numero: f.numero, client: c.nom, montant: f.montant } }));
+    setFacture(f);
+  };
+
+  if (facture) {
+    const c = clients.find((x) => x.id === facture.clientId) || {};
+    const ps = parametresSociete(db);
+    const lignes = bonsClient(db, facture.clientId).filter((b) => b.date >= facture.du && b.date <= facture.au).sort((a, b) => (a.date < b.date ? -1 : 1));
+    const total = lignes.reduce((a, b) => a + bonTotal(b), 0);
+    const regs = reglementsClient(db, facture.clientId).filter((r) => r.date >= facture.du && r.date <= facture.au);
+    const th = { textAlign: "left", padding: "6px 8px", borderBottom: "2px solid #333", fontSize: 12 };
+    const td = { padding: "5px 8px", borderBottom: "1px solid #ddd", fontSize: 12 };
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex gap-2 smi-no-print">
+          <Button variant="ghost" onClick={() => setFacture(null)}>← Retour</Button>
+          <Button onClick={() => window.print()}><Printer size={16} /> Imprimer / PDF</Button>
+        </div>
+        <div className="rounded-md p-6" style={{ background: "#fff", color: "#222", maxWidth: 800 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, borderBottom: "3px solid #003B73", paddingBottom: 12 }}>
+            <div>
+              <p style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()}</p>
+              {ps.adresse && <p style={{ fontSize: 12 }}>{ps.adresse}</p>}
+              {(ps.telephone || ps.email) && <p style={{ fontSize: 12 }}>{[ps.telephone, ps.email].filter(Boolean).join(" · ")}</p>}
+              {ps.identifiant && <p style={{ fontSize: 12 }}>{ps.identifiant}</p>}
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <p style={{ fontSize: 20, fontWeight: 700, color: "#003B73" }}>FACTURE</p>
+              <p style={{ fontSize: 13, fontWeight: 600 }}>{facture.numero}</p>
+              <p style={{ fontSize: 12 }}>Date : {fmtDateLong(facture.date)}</p>
+              <p style={{ fontSize: 12 }}>Période : {fmtDateLong(facture.du)} au {fmtDateLong(facture.au)}</p>
+            </div>
+          </div>
+          <div style={{ margin: "14px 0" }}>
+            <p style={{ fontSize: 11, color: "#666" }}>FACTURÉ À</p>
+            <p style={{ fontSize: 15, fontWeight: 700 }}>{c.nom}</p>
+            {c.adresse && <p style={{ fontSize: 12 }}>{c.adresse}</p>}
+            {(c.contact || c.telephone) && <p style={{ fontSize: 12 }}>{[c.contact, c.telephone].filter(Boolean).join(" · ")}</p>}
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={th}>Date</th><th style={th}>Station</th><th style={th}>N° bon</th><th style={th}>Véhicule</th><th style={th}>Produit</th><th style={{ ...th, textAlign: "right" }}>Litres</th><th style={{ ...th, textAlign: "right" }}>Prix</th><th style={{ ...th, textAlign: "right" }}>Montant</th></tr></thead>
+            <tbody>
+              {lignes.map((b) => (
+                <tr key={b.id}>
+                  <td style={td}>{fmtDateLong(b.date)}</td><td style={td}>{stNom(b.stationId)}</td><td style={td}>{b.numeroBon || "—"}</td><td style={td}>{b.immatriculation || "—"}</td>
+                  <td style={td}>{b.produit === "essence" ? "Essence" : b.produit === "gasoil" ? "Gasoil" : b.libelle}</td>
+                  <td style={{ ...td, textAlign: "right" }}>{fmtVol(b.quantite)}</td><td style={{ ...td, textAlign: "right" }}>{fmtMontant(b.prixUnitaire)}</td><td style={{ ...td, textAlign: "right" }}>{fmtMontant(bonTotal(b))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+            <table style={{ minWidth: 300 }}>
+              <tbody>
+                <tr><td style={{ ...td, fontWeight: 700 }}>Total de la facture</td><td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmtMontant(total)}</td></tr>
+                {regs.length > 0 && <tr><td style={td}>Règlements reçus sur la période</td><td style={{ ...td, textAlign: "right" }}>{fmtMontant(regs.reduce((a, r) => a + num(r.montant), 0))}</td></tr>}
+                <tr><td style={{ ...td, fontWeight: 700, color: "#003B73" }}>Solde du compte au {fmtDateLong(todayISO())}</td><td style={{ ...td, textAlign: "right", fontWeight: 700, color: "#003B73" }}>{fmtMontant(soldeClient(db, c))}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          {ps.mentions && <p style={{ fontSize: 11, color: "#555", marginTop: 18 }}>{ps.mentions}</p>}
+          <p style={{ fontSize: 10, color: "#888", marginTop: 8 }}>Facture établie avec {APP_NAME}.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="smi-display text-2xl">Clients à crédit</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Le carburant vendu à crédit se saisit dans Bons en choisissant le client. Ici : ce que chaque client doit, ses règlements, son plafond, et ses factures.</p>
+        </div>
+        {isAdmin && <div className="flex gap-2"><Button variant="ghost" onClick={() => setShowParams(!showParams)}><Settings2 size={16} /> En-tête des factures</Button><Button onClick={() => { setErr(""); setForm({ nom: "", contact: "", telephone: "", adresse: "", plafond: "", soldeInitial: "", delaiPaiement: "30" }); }}><Plus size={16} /> Client</Button></div>}
+      </div>
+
+      <Card className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="text-sm" style={{ color: C.textMuted }}>Total dû par les clients</span>
+        <GaugeNumber value={fmtMontant(totalCreances)} tone={totalCreances > 0 ? "amber" : "muted"} size="lg" />
+      </Card>
+
+      {showParams && isAdmin && (
+        <Card className="max-w-2xl">
+          <p className="font-semibold mb-3">Coordonnées affichées sur les factures</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Adresse"><input className={inputCls} style={inputSty()} value={params.adresse} onChange={(e) => setParams({ ...params, adresse: e.target.value })} /></Field>
+            <Field label="Téléphone"><input className={inputCls} style={inputSty()} value={params.telephone} onChange={(e) => setParams({ ...params, telephone: e.target.value })} /></Field>
+            <Field label="E-mail"><input className={inputCls} style={inputSty()} value={params.email} onChange={(e) => setParams({ ...params, email: e.target.value })} /></Field>
+            <Field label="RCCM / NIF"><input className={inputCls} style={inputSty()} value={params.identifiant} onChange={(e) => setParams({ ...params, identifiant: e.target.value })} /></Field>
+          </div>
+          <div className="mt-3"><Field label="Mentions en bas de facture"><input className={inputCls} style={inputSty()} value={params.mentions} onChange={(e) => setParams({ ...params, mentions: e.target.value })} /></Field></div>
+          <div className="flex justify-end gap-2 mt-4"><Button variant="ghost" onClick={() => setShowParams(false)}>Annuler</Button><Button onClick={saveParams}>Enregistrer</Button></div>
+        </Card>
+      )}
+
+      {form && (
+        <Card className="max-w-2xl">
+          <p className="font-semibold mb-3">{form.id ? "Modifier le client" : "Nouveau client"}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Nom (entreprise ou personne)"><input className={inputCls} style={inputSty()} value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} /></Field>
+            <Field label="Contact"><input className={inputCls} style={inputSty()} value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} /></Field>
+            <Field label="Téléphone"><input className={inputCls} style={inputSty()} value={form.telephone} onChange={(e) => setForm({ ...form, telephone: e.target.value })} /></Field>
+            <Field label="Adresse"><input className={inputCls} style={inputSty()} value={form.adresse} onChange={(e) => setForm({ ...form, adresse: e.target.value })} /></Field>
+            <Field label="Plafond de crédit" hint="Vide = sans plafond. Alerte quand le solde l'approche."><NumberInput value={form.plafond} onChange={(e) => setForm({ ...form, plafond: e.target.value })} /></Field>
+            <Field label="Délai de paiement (jours)"><NumberInput value={form.delaiPaiement} onChange={(e) => setForm({ ...form, delaiPaiement: e.target.value })} /></Field>
+            <Field label="Solde de départ dû" hint="Ce que le client devait déjà avant l'application."><NumberInput value={form.soldeInitial} onChange={(e) => setForm({ ...form, soldeInitial: e.target.value })} /></Field>
+          </div>
+          {err && <p className="text-xs mt-3" style={{ color: C.danger }}>{err}</p>}
+          <div className="flex justify-end gap-2 mt-4"><Button variant="ghost" onClick={() => setForm(null)}>Annuler</Button><Button onClick={saveClient}><CheckCircle2 size={16} /> Enregistrer</Button></div>
+        </Card>
+      )}
+
+      {clients.length === 0 && !form && <EmptyState icon={Users} title="Aucun client à crédit" hint={isAdmin ? "Ajoutez vos clients en compte (entreprises, flottes de véhicules...)." : "L'administrateur n'a pas encore créé de client."} />}
+
+      <Card className="smi-no-print">
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Période des factures — du"><TextInput type="date" value={periode.du} onChange={(e) => setPeriode({ ...periode, du: e.target.value })} /></Field>
+          <Field label="au"><TextInput type="date" value={periode.au} onChange={(e) => setPeriode({ ...periode, au: e.target.value })} /></Field>
+        </div>
+      </Card>
+
+      <div className="grid md:grid-cols-2 gap-3">
+        {clients.map((c) => {
+          const solde = soldeClient(db, c);
+          const plafond = num(c.plafond);
+          const ratio = plafond > 0 ? solde / plafond : 0;
+          const bons = bonsClient(db, c.id).sort((a, b) => (a.date < b.date ? 1 : -1));
+          const regs = reglementsClient(db, c.id).sort((a, b) => (a.date < b.date ? 1 : -1));
+          const facts = (db.factures || []).filter((f) => f.clientId === c.id).sort((a, b) => (a.numero < b.numero ? 1 : -1));
+          const surPeriode = bons.filter((b) => b.date >= periode.du && b.date <= periode.au);
+          return (
+            <Card key={c.id} className="flex flex-col gap-2">
+              <div className="flex items-start justify-between gap-2">
+                <div><p className="font-semibold">{c.nom}</p><p className="text-xs" style={{ color: C.textFaint }}>{[c.contact, c.telephone].filter(Boolean).join(" · ") || "—"}</p></div>
+                {plafond > 0 && ratio >= 1 ? <Pill tone="danger">Plafond dépassé</Pill> : plafond > 0 && ratio >= 0.8 ? <Pill tone="amber">Proche du plafond</Pill> : solde > 0 ? <Pill tone="amber">Doit</Pill> : <Pill tone="success">À jour</Pill>}
+              </div>
+              <div className="flex items-center justify-between"><span className="text-xs" style={{ color: C.textFaint }}>Solde dû{plafond > 0 ? ` (plafond ${fmtMontant(plafond)})` : ""}</span><GaugeNumber value={fmtMontant(solde)} tone={solde > 0 ? "amber" : "muted"} /></div>
+              {plafond > 0 && <div style={{ height: 6, borderRadius: 3, background: C.bgAlt }}><div style={{ width: `${Math.min(100, ratio * 100)}%`, height: "100%", borderRadius: 3, background: ratio >= 1 ? C.danger : ratio >= 0.8 ? C.amber : C.teal }} /></div>}
+              <p className="text-xs" style={{ color: C.textFaint }}>{bons.length} bon(s) · {regs.length} règlement(s) · {surPeriode.length} bon(s) sur la période</p>
+              <div className="flex gap-2 flex-wrap">
+                <Button onClick={() => { setErr(""); setReg({ clientId: c.id, date: todayISO(), montant: solde > 0 ? String(Math.round(solde)) : "", mode: "Espèces", stationId: isAdmin ? "" : profile.stationId, encaisseEnCaisse: !isAdmin, note: "" }); }} disabled={solde <= 0}>Encaisser</Button>
+                {isAdmin && <Button variant="ghost" onClick={() => emettreFacture(c)} disabled={surPeriode.length === 0}><Printer size={14} /> Facture de la période</Button>}
+                <Button variant="ghost" onClick={() => setOpenId(openId === c.id ? null : c.id)}>{openId === c.id ? "Masquer" : "Relevé"}</Button>
+                {isAdmin && <Button variant="ghost" onClick={() => { setErr(""); setForm({ ...c }); }}><Pencil size={14} /></Button>}
+                {isAdmin && <Button variant="ghost" onClick={() => removeClient(c)}><Trash2 size={14} /></Button>}
+              </div>
+              {reg?.clientId === c.id && (
+                <div className="rounded-md p-3 flex flex-col gap-2" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Date"><TextInput type="date" value={reg.date} max={todayISO()} onChange={(e) => setReg({ ...reg, date: e.target.value })} /></Field>
+                    <Field label="Montant reçu"><NumberInput value={reg.montant} onChange={(e) => setReg({ ...reg, montant: e.target.value })} /></Field>
+                    <Field label="Mode"><SelectInput value={reg.mode} onChange={(e) => setReg({ ...reg, mode: e.target.value })}>{MODES_PAIEMENT.map((m) => <option key={m}>{m}</option>)}</SelectInput></Field>
+                    {isAdmin && <Field label="Station"><SelectInput value={reg.stationId} onChange={(e) => setReg({ ...reg, stationId: e.target.value })}><option value="">Direction / siège</option>{db.stations.map((st) => <option key={st.id} value={st.id}>{st.nom}</option>)}</SelectInput></Field>}
+                  </div>
+                  {reg.mode === "Espèces" && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!reg.encaisseEnCaisse} onChange={(e) => setReg({ ...reg, encaisseEnCaisse: e.target.checked })} /> Argent reçu dans la caisse de la station</label>}
+                  <Field label="Note"><input className={inputCls} style={inputSty()} value={reg.note} onChange={(e) => setReg({ ...reg, note: e.target.value })} /></Field>
+                  {err && <p className="text-xs" style={{ color: C.danger }}>{err}</p>}
+                  <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setReg(null)}>Annuler</Button><Button onClick={saveReg}>Enregistrer</Button></div>
+                </div>
+              )}
+              {openId === c.id && (
+                <div className="text-xs flex flex-col gap-1 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+                  {facts.length > 0 && <div className="flex flex-wrap gap-1 mb-1">{facts.map((f) => <button key={f.id} className="smi-btn" onClick={() => setFacture(f)}><Pill tone="teal">{f.numero} · {fmtMontant(f.montant)}</Pill></button>)}</div>}
+                  {[...bons.map((b) => ({ t: "b", d: b.date, x: b })), ...regs.map((r) => ({ t: "r", d: r.date, x: r }))].sort((a, b) => (a.d < b.d ? 1 : -1)).map(({ t, x }) => t === "b"
+                    ? <div key={x.id} className="flex justify-between gap-2"><span>{fmtDateLong(x.date)} · {stNom(x.stationId)} · {x.produit || x.libelle} {fmtVol(x.quantite)}{x.immatriculation ? ` · ${x.immatriculation}` : ""}{x.numeroBon ? ` · bon ${x.numeroBon}` : ""}</span><span className="smi-mono">+ {fmtMontant(bonTotal(x))}</span></div>
+                    : <div key={x.id} className="flex justify-between gap-2" style={{ color: C.success }}><span>{fmtDateLong(x.date)} · règlement {x.mode}{x.stationId ? ` · ${stNom(x.stationId)}` : ""}{x.note ? ` · ${x.note}` : ""}</span><span className="smi-mono flex items-center gap-2">− {fmtMontant(x.montant)}{isAdmin && <button className="smi-btn" style={{ color: C.danger }} onClick={() => removeReg(x)}><Trash2 size={12} /></button>}</span></div>)}
+                  {bons.length + regs.length === 0 && <span style={{ color: C.textFaint }}>Aucun mouvement.</span>}
+                </div>
+              )}
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ Compte station ------------------------------ */
+
+// Compte d'une station envers son fournisseur, quand les versements des gérants paient le
+// carburant reçu (comme le suivi « VERSEMENT » sur Excel) :
+//   à verser  = stock de roulement de départ + réceptions, au prix de cession
+//   reste     = à verser − versements − bons − dépenses payées par la caisse + ajustement
+// Contrôle : ce que la station détient (stock restant au prix de cession + caisse non
+// versée) doit couvrir le reste à verser ; la différence, une fois la marge de la station
+// (prix de vente − prix de cession) prise en compte, est un manquant ou un excédent.
+function calcCompteStation(db, stationId, jusquA = todayISO()) {
+  const c = compteStation(db, stationId);
+  if (!c || !c.dateDebut) return null;
+  const d0 = c.dateDebut;
+  const dans = (x) => x.stationId === stationId && x.date >= d0 && x.date <= jusquA;
+  const pcE = num(c.prixCessionE), pcG = num(c.prixCessionG);
+  const valeurDepart = num(c.stockInitialE) * pcE + num(c.stockInitialG) * pcG;
+  const recs = db.receptions.filter(dans).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const valeurReceptions = recs.reduce((a, r) => a + montantReception(r, db), 0);
+  const aVerser = valeurDepart + valeurReceptions;
+  const versements = db.versements.filter(dans).reduce((a, v) => a + versementTotal(v), 0);
+  const bons = (db.bons || []).filter(dans).reduce((a, b) => a + bonTotal(b), 0);
+  const depensesCaisse = (db.depenses || []).filter((d) => dans(d) && d.payeeParCaisse && d.statut !== "refusee").reduce((a, d) => a + num(d.montant), 0);
+  const ajustement = num(c.ajustement);
+  // Ce sont les versements de la station qui paient : un règlement fait directement par la
+  // direction au fournisseur ne change pas ce que la station doit.
+  const paye = versements + bons + depensesCaisse;
+  const reste = aVerser - paye + ajustement;
+
+  // Contrôle par le stock et la caisse
+  const lastStock = db.stocks.filter(dans).map((x) => x.date).sort().pop();
+  const st = lastStock ? computeStock(db.releves, db.stocks, stationId, lastStock) : null;
+  const stockE = st ? Math.max(0, stockAffichable(st, "essence")) : null;
+  const stockG = st ? Math.max(0, stockAffichable(st, "gasoil")) : null;
+  const pmE = prixAchatMoyen(db, stationId, "essence", jusquA) || pcE;
+  const pmG = prixAchatMoyen(db, stationId, "gasoil", jusquA) || pcG;
+  const valeurStock = st ? stockE * pmE + stockG * pmG : null;
+  const lastCaisse = db.caisses.filter(dans).map((x) => x.date).sort().pop();
+  const caisse = lastCaisse ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, lastCaisse, db.depenses, db.reglementsClients) : null;
+  const caisseNonVersee = caisse ? (caisse.caisseDuJour ?? caisse.caisseAttendue) : 0;
+  const dates = [...new Set(db.releves.filter(dans).map((r) => r.date))];
+  let ca = 0, lE = 0, lG = 0;
+  dates.forEach((d) => { const v = computeVente(db.releves, db.ventes, stationId, d); ca += v.ca; lE += v.essence; lG += v.gasoil; });
+  const marge = ca - (lE * pmE + lG * pmG);
+  const ecart = valeurStock === null ? null : reste - (valeurStock + caisseNonVersee) + marge; // > 0 : manquant
+
+  // Livraison par livraison (le plus ancien est payé en premier)
+  // Un ajustement négatif agit comme un paiement ; un ajustement positif comme une somme due de plus.
+  let dispo = paye + Math.max(0, -ajustement);
+  const lots = [];
+  if (valeurDepart > 0) lots.push({ id: "depart", date: d0, libelle: "Stock de roulement de départ", litres: num(c.stockInitialE) + num(c.stockInitialG), montant: valeurDepart });
+  if (ajustement > 0) lots.push({ id: "ajustement", date: d0, libelle: `Ajustement de reprise${c.ajustementLibelle ? ` (${c.ajustementLibelle})` : ""}`, litres: 0, montant: ajustement });
+  recs.forEach((r) => lots.push({ id: r.id, date: r.date, libelle: `${r.produit === "essence" ? "Essence" : "Gasoil"}${r.numeroBon ? ` · bon ${r.numeroBon}` : ""}`, litres: num(r.quantite), montant: montantReception(r, db) }));
+  lots.forEach((l) => { const p = Math.min(l.montant, Math.max(0, dispo)); l.paye = p; l.reste = l.montant - p; dispo -= p; });
+
+  return { compte: c, valeurDepart, valeurReceptions, aVerser, versements, bons, depensesCaisse, ajustement, paye, reste, stockE, stockG, valeurStock, stockDate: lastStock, caisseNonVersee, caisseDate: lastCaisse, ca, litres: lE + lG, marge, ecart, lots };
+}
+
+function CompteStationView({ db, setDb, profile }) {
+  const isAdmin = profile.role === "admin";
+  const stations = isAdmin ? db.stations : db.stations.filter((s) => s.id === profile.stationId);
+  const [stationId, setStationId] = useState(stations[0]?.id || "");
+  const [edit, setEdit] = useState(null);
+  const [err, setErr] = useState("");
+  const station = db.stations.find((s) => s.id === stationId);
+  const devise = station?.devise || "GNF";
+  const c = compteStation(db, stationId);
+  const r = useMemo(() => (stationId ? calcCompteStation(db, stationId) : null), [db, stationId]);
+  const resume = useMemo(() => stations.map((s) => ({ s, r: calcCompteStation(db, s.id) })), [db, stations]);
+
+  const openEdit = () => { setErr(""); setEdit(c ? { ...c } : { stationId, dateDebut: todayISO(), stockInitialE: "", stockInitialG: "", prixCessionE: "", prixCessionG: "", fournisseurId: "", ajustement: "", ajustementLibelle: "" }); };
+  const save = () => {
+    setErr("");
+    if (!edit.dateDebut) { setErr("Indiquez la date de début du suivi."); return; }
+    if (num(edit.prixCessionE) <= 0 && num(edit.prixCessionG) <= 0) { setErr("Indiquez au moins un prix de cession."); return; }
+    const row = { ...edit, id: c?.id || uid(), stationId };
+    setDb(withAudit({ ...db, comptesStations: [...(db.comptesStations || []).filter((x) => x.stationId !== stationId), row] }, { user: profile?.name, role: profile?.role, stationId, entity: "compte station", action: c ? "modification" : "création", after: { dateDebut: row.dateDebut, prixCessionE: row.prixCessionE, prixCessionG: row.prixCessionG, ajustement: row.ajustement } }));
+    setEdit(null);
+  };
+  const ligne = (label, v, o = {}) => (
+    <div className="flex items-center justify-between gap-3 py-1.5" style={{ borderTop: o.top ? `1px solid ${C.border}` : undefined }}>
+      <span className="text-sm" style={{ color: o.muted ? C.textFaint : C.text, fontWeight: o.bold ? 700 : 400 }}>{label}</span>
+      <span className="smi-mono text-sm" style={{ fontWeight: o.bold ? 700 : 500, color: o.color || C.text }}>{v}</span>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="smi-display text-2xl">Compte station</h2>
+          <p className="text-sm" style={{ color: C.textMuted }}>Ce que chaque station doit au fournisseur quand les versements paient le carburant reçu : valeur à verser au prix de cession, versements, reste à verser, et contrôle par le stock et la caisse.</p>
+        </div>
+        {isAdmin && stations.length > 1 && <div className="w-56"><SelectInput value={stationId} onChange={(e) => { setStationId(e.target.value); setEdit(null); }}>{stations.map((s) => <option key={s.id} value={s.id}>{s.nom}</option>)}</SelectInput></div>}
+      </div>
+
+      {isAdmin && stations.length > 1 && (
+        <Card>
+          <p className="font-semibold mb-2">Toutes les stations</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr style={{ color: C.textMuted }}><th className="text-left py-1 pr-3">Station</th><th className="text-right pr-3">À verser</th><th className="text-right pr-3">Versé (+ bons, dépenses)</th><th className="text-right pr-3">Reste à verser</th><th className="text-right">Manquant / excédent</th></tr></thead>
+              <tbody>
+                {resume.map(({ s, r: x }) => (
+                  <tr key={s.id} style={{ borderTop: `1px solid ${C.border}`, cursor: "pointer" }} onClick={() => setStationId(s.id)}>
+                    <td className="py-1.5 pr-3">{s.nom}</td>
+                    {x ? <>
+                      <td className="text-right pr-3 smi-mono">{fmtMontant(x.aVerser, s.devise)}</td>
+                      <td className="text-right pr-3 smi-mono">{fmtMontant(x.paye, s.devise)}</td>
+                      <td className="text-right pr-3 smi-mono font-semibold">{fmtMontant(x.reste, s.devise)}</td>
+                      <td className="text-right smi-mono" style={{ color: x.ecart === null ? C.textFaint : x.ecart > 1000 ? C.danger : C.success }}>{x.ecart === null ? "—" : x.ecart > 1000 ? `Manque ${fmtMontant(x.ecart, s.devise)}` : x.ecart < -1000 ? `+${fmtMontant(-x.ecart, s.devise)}` : "Équilibré"}</td>
+                    </> : <td colSpan={4} className="text-right text-xs" style={{ color: C.textFaint }}>Compte non paramétré</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {station && (!c || edit) && isAdmin && (
+        <Card className="max-w-2xl">
+          {!edit ? (
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-sm" style={{ color: C.textMuted }}>Le compte de {station.nom} n'est pas encore paramétré.</p>
+              <Button onClick={openEdit}>Paramétrer</Button>
+            </div>
+          ) : (
+            <>
+              <p className="font-semibold mb-3">Paramètres du compte — {station.nom}</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Field label="Début du suivi" hint="Les réceptions et versements comptent à partir de cette date."><TextInput type="date" value={edit.dateDebut} onChange={(e) => setEdit({ ...edit, dateDebut: e.target.value })} /></Field>
+                <Field label="Fournisseur payé par les versements"><SelectInput value={edit.fournisseurId} onChange={(e) => setEdit({ ...edit, fournisseurId: e.target.value })}><option value="">— Aucun —</option>{(db.fournisseurs || []).map((f) => <option key={f.id} value={f.id}>{f.nom}</option>)}</SelectInput></Field>
+                <Field label="Stock de roulement de départ — essence (L)"><NumberInput value={edit.stockInitialE} onChange={(e) => setEdit({ ...edit, stockInitialE: e.target.value })} /></Field>
+                <Field label="Stock de roulement de départ — gasoil (L)"><NumberInput value={edit.stockInitialG} onChange={(e) => setEdit({ ...edit, stockInitialG: e.target.value })} /></Field>
+                <Field label={`Prix de cession essence (${devise}/L)`} hint="Fixé par le fournisseur. Une réception peut avoir son propre prix."><NumberInput value={edit.prixCessionE} onChange={(e) => setEdit({ ...edit, prixCessionE: e.target.value })} /></Field>
+                <Field label={`Prix de cession gasoil (${devise}/L)`}><NumberInput value={edit.prixCessionG} onChange={(e) => setEdit({ ...edit, prixCessionG: e.target.value })} /></Field>
+                <Field label={`Ajustement de reprise (${devise})`} hint="+ ajoute au reste à verser, − le diminue (correction ponctuelle)."><NumberInput value={edit.ajustement} onChange={(e) => setEdit({ ...edit, ajustement: e.target.value })} /></Field>
+                <Field label="Motif de l'ajustement"><input className={inputCls} style={inputSty()} value={edit.ajustementLibelle} onChange={(e) => setEdit({ ...edit, ajustementLibelle: e.target.value })} /></Field>
+              </div>
+              {err && <p className="text-xs mt-3" style={{ color: C.danger }}>{err}</p>}
+              <div className="flex justify-end gap-2 mt-4"><Button variant="ghost" onClick={() => setEdit(null)}>Annuler</Button><Button onClick={save}><CheckCircle2 size={16} /> Enregistrer</Button></div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {station && !c && !isAdmin && <EmptyState icon={Landmark} title="Compte non paramétré" hint="L'administrateur doit d'abord paramétrer le compte de votre station." />}
+
+      {r && !edit && (
+        <>
+          <div className="grid md:grid-cols-2 gap-3">
+            <Card>
+              <div className="flex items-center justify-between mb-1">
+                <p className="font-semibold">{station.nom} — depuis le {fmtDateLong(r.compte.dateDebut)}</p>
+                {isAdmin && <button className="smi-btn text-xs flex items-center gap-1" style={{ color: C.teal }} onClick={openEdit}><Pencil size={12} /> Paramètres</button>}
+              </div>
+              {ligne("Stock de roulement de départ", fmtMontant(r.valeurDepart, devise))}
+              {ligne("+ Réceptions", fmtMontant(r.valeurReceptions, devise))}
+              {ligne("= Total à verser", fmtMontant(r.aVerser, devise), { bold: true, top: true })}
+              {ligne("− Versements", fmtMontant(r.versements, devise))}
+              {ligne("− Bons", fmtMontant(r.bons, devise))}
+              {r.depensesCaisse > 0 && ligne("− Dépenses payées par la caisse", fmtMontant(r.depensesCaisse, devise))}
+              {r.ajustement !== 0 && ligne(`${r.ajustement > 0 ? "+" : "−"} Ajustement${r.compte.ajustementLibelle ? ` (${r.compte.ajustementLibelle})` : ""}`, fmtMontant(Math.abs(r.ajustement), devise))}
+              {ligne("= Reste à verser", fmtMontant(r.reste, devise), { bold: true, top: true, color: r.reste > 0 ? C.amber : C.success })}
+              {r.compte.fournisseurId && <p className="text-xs mt-1" style={{ color: C.textFaint }}>Les versements de cette station paient {(db.fournisseurs || []).find((f) => f.id === r.compte.fournisseurId)?.nom || "le fournisseur"} : ce reste à verser compte dans sa dette.</p>}
+            </Card>
+            <Card>
+              <p className="font-semibold mb-1">Contrôle par le stock et la caisse</p>
+              {r.valeurStock === null ? <p className="text-sm" style={{ color: C.textFaint }}>Aucun contrôle de stock depuis le début du suivi.</p> : (
+                <>
+                  {ligne(`Stock restant (${fmtDateLong(r.stockDate)})`, `${fmtVol(r.stockE + r.stockG)} · ${fmtMontant(r.valeurStock, devise)}`)}
+                  {ligne(`Caisse non versée${r.caisseDate ? ` (${fmtDateLong(r.caisseDate)})` : ""}`, fmtMontant(r.caisseNonVersee, devise))}
+                  {ligne("= Ce que la station détient", fmtMontant(r.valeurStock + r.caisseNonVersee, devise), { bold: true, top: true })}
+                  {ligne("Marge de la station (vente − cession)", fmtMontant(r.marge, devise), { muted: true })}
+                  <div className="rounded-md p-3 mt-2" style={{ background: r.ecart > 1000 ? C.dangerSoft : C.panelAlt, border: `1px solid ${r.ecart > 1000 ? C.danger : C.border}` }}>
+                    <p className="text-xs uppercase font-semibold" style={{ color: r.ecart > 1000 ? C.danger : C.textMuted }}>{r.ecart > 1000 ? "Manquant à expliquer" : r.ecart < -1000 ? "Excédent" : "Compte équilibré"}</p>
+                    <GaugeNumber value={fmtMontant(Math.abs(r.ecart), devise)} tone={r.ecart > 1000 ? "danger" : "muted"} size="lg" />
+                    <p className="text-xs mt-1" style={{ color: C.textFaint }}>Reste à verser − ce que la station détient + sa marge. Un manquant vient d'un écart de stock, d'argent non versé ou d'une saisie oubliée.</p>
+                  </div>
+                </>
+              )}
+            </Card>
+          </div>
+
+          <Card>
+            <p className="font-semibold mb-2">Livraison par livraison <span className="text-xs font-normal" style={{ color: C.textFaint }}>(les plus anciennes sont payées en premier)</span></p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr style={{ color: C.textMuted }}><th className="text-left py-1 pr-3">Date</th><th className="text-left pr-3">Livraison</th><th className="text-right pr-3">Litres</th><th className="text-right pr-3">Montant</th><th className="text-right pr-3">Payé</th><th className="text-right pr-3">Reste</th><th className="text-right">Statut</th></tr></thead>
+                <tbody>
+                  {r.lots.map((l) => (
+                    <tr key={l.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <td className="py-1.5 pr-3">{fmtDateLong(l.date)}</td><td className="pr-3">{l.libelle}</td>
+                      <td className="text-right pr-3 smi-mono">{fmtVol(l.litres)}</td><td className="text-right pr-3 smi-mono">{fmtMontant(l.montant, devise)}</td>
+                      <td className="text-right pr-3 smi-mono">{fmtMontant(l.paye, devise)}</td><td className="text-right pr-3 smi-mono">{fmtMontant(l.reste, devise)}</td>
+                      <td className="text-right">{l.reste <= 1 ? <Pill tone="success">Soldée</Pill> : l.paye > 0 ? <Pill tone="amber">En cours</Pill> : <Pill tone="muted">À payer</Pill>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------- Tableau de bord financier --------------------------- */
+
+const isoAddDays = (iso, n) => { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+
+// Courbe simple des entrées (ventes) et sorties (dépenses + paiements fournisseurs) jour par jour.
+function CourbeFlux({ jours, entrees, sorties }) {
+  const W = 640, H = 170, mx = Math.max(1, ...entrees, ...sorties);
+  const x = (i) => 40 + (i * (W - 60)) / Math.max(1, jours.length - 1);
+  const y = (v) => H - 20 - (v / mx) * (H - 40);
+  const pts = (a) => a.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  const aire = (a, c) => (<g><polygon points={`${x(0)},${H - 20} ${pts(a)} ${x(a.length - 1)},${H - 20}`} fill={c} opacity="0.15" /><polyline points={pts(a)} fill="none" stroke={c} strokeWidth="2.5" />{a.map((v, i) => <circle key={i} cx={x(i)} cy={y(v)} r="3" fill={c} />)}</g>);
+  const court = (v) => v >= 1e9 ? `${(v / 1e9).toFixed(1)} Md` : v >= 1e6 ? `${(v / 1e6).toFixed(0)} M` : `${Math.round(v / 1000)} k`;
+  return (
+    <svg viewBox={`0 0 ${W} ${H + 6}`} width="100%" role="img" aria-label="Entrées et sorties par jour">
+      {[0, 0.5, 1].map((f) => <g key={f}><line x1="40" x2={W - 20} y1={y(mx * f)} y2={y(mx * f)} stroke={C.border} strokeDasharray="3 3" /><text x="2" y={y(mx * f) + 4} fontSize="10" fill={C.textFaint}>{court(mx * f)}</text></g>)}
+      {aire(entrees, C.teal)}
+      {aire(sorties, C.amber)}
+      {jours.map((d, i) => <text key={d} x={x(i)} y={H + 2} fontSize="10" textAnchor="middle" fill={C.textFaint}>{d.slice(8)}/{d.slice(5, 7)}</text>)}
+    </svg>
+  );
+}
+
+function FinanceOverview({ db }) {
+  const [periode, setPeriode] = useState("mois");
+  const [stationId, setStationId] = useState("");
+  const today = todayISO();
+  const annee = today.slice(0, 4);
+
+  const data = useMemo(() => {
+    const stations = db.stations.filter((s) => !stationId || s.id === stationId);
+    const ids = new Set(stations.map((s) => s.id));
+    // Ventes par jour et par station (litres + CA), calculées une seule fois.
+    const ventesJour = {}; // date -> { ca, e: {stationId: litres}, g: {...} }
+    const cles = new Set(db.releves.filter((r) => ids.has(r.stationId)).map((r) => `${r.stationId}|${r.date}`));
+    cles.forEach((k) => {
+      const [sid, d] = k.split("|");
+      const v = computeVente(db.releves, db.ventes, sid, d);
+      const j = (ventesJour[d] = ventesJour[d] || { ca: 0, l: [] });
+      j.ca += v.ca; j.l.push({ sid, e: v.essence, g: v.gasoil });
+    });
+    const caEntre = (a, b) => Object.entries(ventesJour).filter(([d]) => d >= a && d <= b).reduce((t, [, j]) => t + j.ca, 0);
+    const coutEntre = (a, b) => Object.entries(ventesJour).filter(([d]) => d >= a && d <= b).reduce((t, [, j]) => t + j.l.reduce((u, x) => u + x.e * (prixAchatMoyen(db, x.sid, "essence", b) || 0) + x.g * (prixAchatMoyen(db, x.sid, "gasoil", b) || 0), 0), 0);
+    const deps = (db.depenses || []).filter((d) => ids.has(d.stationId) && d.statut === "validee");
+    const depEntre = (a, b) => deps.filter((d) => d.date >= a && d.date <= b).reduce((t, d) => t + num(d.montant), 0);
+    const paiementsFour = (a, b) => (db.paiementsFournisseurs || []).filter((p) => (!stationId || p.stationId === stationId) && p.date >= a && p.date <= b).reduce((t, p) => t + num(p.montant), 0)
+      + db.receptions.filter((r) => ids.has(r.stationId) && r.date >= a && r.date <= b).reduce((t, r) => t + num(r.montantPaye), 0);
+    const versEntre = (a, b) => db.versements.filter((v) => ids.has(v.stationId) && v.date >= a && v.date <= b).reduce((t, v) => t + versementTotal(v), 0);
+
+    const du = periode === "jour" ? today : periode === "7j" ? isoAddDays(today, -6) : today.slice(0, 8) + "01";
+    // Valeur du stock en cuve : dernier contrôle de chaque station, au prix de vente et au prix d'achat moyen.
+    let litres = 0, valeurVente = 0, valeurAchat = 0, achatConnu = true;
+    stations.forEach((s) => {
+      const last = db.stocks.filter((x) => x.stationId === s.id).map((x) => x.date).sort().pop();
+      if (!last) return;
+      const st = computeStock(db.releves, db.stocks, s.id, last);
+      const v = findVente(db.ventes, s.id, last) || latestBefore(db.ventes, s.id, last) || {};
+      ["essence", "gasoil"].forEach((p) => {
+        const l = Math.max(0, stockAffichable(st, p));
+        litres += l;
+        valeurVente += l * num(p === "essence" ? v.prixEssence : v.prixGasoil);
+        const pa = prixAchatMoyen(db, s.id, p, today);
+        if (pa === null && l > 0) achatConnu = false;
+        valeurAchat += l * (pa || 0);
+      });
+    });
+    const mois = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"].map((nom, i) => {
+      const a = `${annee}-${String(i + 1).padStart(2, "0")}-01`;
+      const b = `${annee}-${String(i + 1).padStart(2, "0")}-31`;
+      const ventes = caEntre(a, b), cout = coutEntre(a, b), depenses = depEntre(a, b);
+      return { nom, ventes, cout, depenses, resultat: ventes - cout - depenses, courant: today.slice(5, 7) === String(i + 1).padStart(2, "0") };
+    });
+    const jours = [...Array(7)].map((_, i) => isoAddDays(today, i - 6));
+    return {
+      ca: caEntre(du, today), caJour: caEntre(today, today),
+      depenses: depEntre(du, today), depJour: depEntre(today, today),
+      versements: versEntre(du, today),
+      litres, valeurVente, valeurAchat, achatConnu, mois,
+      totAnnee: mois.reduce((t, m) => ({ ventes: t.ventes + m.ventes, cout: t.cout + m.cout, depenses: t.depenses + m.depenses, resultat: t.resultat + m.resultat }), { ventes: 0, cout: 0, depenses: 0, resultat: 0 }),
+      jours, entrees: jours.map((d) => caEntre(d, d)), sorties: jours.map((d) => depEntre(d, d) + paiementsFour(d, d)),
+      dettes: (db.fournisseurs || []).reduce((t, f) => t + Math.max(0, soldeFournisseur(db, f)), 0),
+      creances: (db.clients || []).reduce((t, c) => t + Math.max(0, soldeClient(db, c)), 0),
+    };
+  }, [db, periode, stationId, today, annee]);
+
+  const Kpi = ({ titre, valeur, bas, droite, tone = "teal" }) => (
+    <div className="rounded-lg p-3 flex flex-col gap-1" style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: `3px solid ${tone === "amber" ? C.amber : tone === "danger" ? C.danger : C.teal}` }}>
+      <span className="text-xs uppercase tracking-wide" style={{ color: C.textFaint }}>{titre}</span>
+      <span className="smi-mono text-lg font-bold">{valeur}</span>
+      {bas && <div className="flex justify-between text-xs" style={{ color: C.textMuted }}><span>{bas}</span><span className="smi-mono">{droite}</span></div>}
+    </div>
+  );
+  const libPeriode = periode === "jour" ? "aujourd'hui" : periode === "7j" ? "7 derniers jours" : "ce mois";
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        {[["jour", "Jour"], ["7j", "7 jours"], ["mois", "Mois"]].map(([k, l]) => (
+          <button key={k} onClick={() => setPeriode(k)} className="smi-btn rounded-full px-3 py-1 text-xs font-semibold" style={{ background: periode === k ? C.amber : C.bgAlt, color: periode === k ? "#fff" : C.textMuted, border: `1px solid ${periode === k ? C.amber : C.border}` }}>{l}</button>
+        ))}
+        <div className="ml-auto w-56"><SelectInput value={stationId} onChange={(e) => setStationId(e.target.value)}><option value="">Toutes les stations</option>{db.stations.map((s) => <option key={s.id} value={s.id}>{s.nom}</option>)}</SelectInput></div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Kpi titre={`Chiffre d'affaires — ${libPeriode}`} valeur={fmtMontant(data.ca)} bas="Aujourd'hui" droite={fmtMontant(data.caJour)} />
+        <Kpi titre="Valeur du stock en cuve" valeur={fmtMontant(data.valeurVente)} bas={`${fmtVol(data.litres)}${data.achatConnu && data.valeurAchat > 0 ? " · au prix d'achat" : ""}`} droite={data.achatConnu && data.valeurAchat > 0 ? fmtMontant(data.valeurAchat) : ""} />
+        <Kpi titre={`Dépenses — ${libPeriode}`} valeur={fmtMontant(data.depenses)} bas="Aujourd'hui" droite={fmtMontant(data.depJour)} tone="amber" />
+        <Kpi titre={`Résultat ${annee}`} valeur={fmtMontant(data.totAnnee.resultat)} bas="Ventes − coût − dépenses" droite="" tone={data.totAnnee.resultat < 0 ? "danger" : "teal"} />
+        <Kpi titre={`Versements — ${libPeriode}`} valeur={fmtMontant(data.versements)} tone="teal" />
+        <Kpi titre="Dettes fournisseurs" valeur={fmtMontant(data.dettes)} tone={data.dettes > 0 ? "danger" : "teal"} />
+        <Kpi titre="Créances clients" valeur={fmtMontant(data.creances)} tone={data.creances > 0 ? "amber" : "teal"} />
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-3">
+        <Card>
+          <p className="font-semibold mb-2 flex justify-between"><span>Exercice {annee}</span><span className="smi-mono">{fmtMontant(data.totAnnee.resultat)}</span></p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr style={{ color: C.textMuted }}><th className="text-left py-1">Mois</th><th className="text-right">Ventes</th><th className="text-right">Coût carburant</th><th className="text-right">Dépenses</th><th className="text-right">Résultat</th></tr></thead>
+              <tbody>
+                {data.mois.map((m) => (
+                  <tr key={m.nom} style={{ borderTop: `1px solid ${C.border}`, color: m.courant ? C.teal : m.ventes === 0 ? C.textFaint : C.text, fontWeight: m.courant ? 700 : 400 }}>
+                    <td className="py-1">{m.nom}</td>
+                    <td className="text-right smi-mono">{fmtMontant(m.ventes)}</td>
+                    <td className="text-right smi-mono">{fmtMontant(m.cout)}</td>
+                    <td className="text-right smi-mono" style={{ color: m.depenses ? C.amber : undefined }}>{fmtMontant(m.depenses)}</td>
+                    <td className="text-right smi-mono" style={{ color: m.resultat < 0 ? C.danger : undefined }}>{fmtMontant(m.resultat)}</td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: `2px solid ${C.border}`, fontWeight: 700 }}>
+                  <td className="py-1">Total</td>
+                  <td className="text-right smi-mono">{fmtMontant(data.totAnnee.ventes)}</td>
+                  <td className="text-right smi-mono">{fmtMontant(data.totAnnee.cout)}</td>
+                  <td className="text-right smi-mono">{fmtMontant(data.totAnnee.depenses)}</td>
+                  <td className="text-right smi-mono">{fmtMontant(data.totAnnee.resultat)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          {!data.achatConnu && <p className="text-xs mt-2" style={{ color: C.amber }}>Prix d'achat manquant pour certaines livraisons : le coût du carburant est sous-estimé. Saisissez-le dans Réception.</p>}
+        </Card>
+        <Card>
+          <p className="font-semibold mb-1">Entrées et sorties — 7 derniers jours</p>
+          <p className="text-xs mb-2" style={{ color: C.textFaint }}><span style={{ color: C.teal }}>■</span> Ventes · <span style={{ color: C.amber }}>■</span> Dépenses et paiements fournisseurs</p>
+          <CourbeFlux jours={data.jours} entrees={data.entrees} sorties={data.sorties} />
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function DashboardView({ db }) {
+  const monthPrefix = todayISO().slice(0, 7);
+
   // useMemo évite de refaire tous ces calculs (potentiellement lourds sur plusieurs mois
   // de données) à chaque rendu déclenché par une saisie ailleurs dans l'app.
-  // Les cumuls couvrent tout l'historique de la station (pas seulement le mois en cours),
-  // pour servir de base directe aux rapports sans recalcul manuel à part.
   const rows = useMemo(() => db.stations.map((s) => {
     const dates = new Set([
-      ...db.releves.filter((r) => r.stationId === s.id).map((r) => r.date),
+      ...db.releves.filter((r) => r.stationId === s.id && r.date.startsWith(monthPrefix)).map((r) => r.date),
     ]);
     let vEssence = 0, vGasoil = 0, ca = 0;
     dates.forEach((d) => {
@@ -3262,15 +4437,8 @@ function DashboardView({ db }) {
     const lastStockDate = [...db.stocks].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     const stock = lastStockDate ? computeStock(db.releves, db.stocks, s.id, lastStockDate) : null;
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === s.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
-    const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, lastCaisseDate) : null;
-    const totalVersements = db.versements.filter((v) => v.stationId === s.id).reduce((a, v) => a + versementTotal(v), 0);
-
-    // Écart de caisse cumulé, recalculé depuis l'historique complet — sert de vérification
-    // indépendante de la « Caisse attendue » du dernier relevé (qui, elle, dépend d'une
-    // saisie manuelle « Caisse précédente » pouvant être oubliée ou erronée).
-    const ecartCaisse = ecartCaisseCumule(db, s.id);
-    const ecartCaisseIncoherent = caisse ? Math.abs(ecartCaisse - caisse.caisseAttendue) > 1000 : false;
-    const ecartStock = ecartStockCumule(db, s.id);
+    const caisse = lastCaisseDate ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, lastCaisseDate, db.depenses, db.reglementsClients) : null;
+    const totalVersements = db.versements.filter((v) => v.stationId === s.id && v.date.startsWith(monthPrefix)).reduce((a, v) => a + versementTotal(v), 0);
 
     // Rythme de vente moyen sur les 7 derniers jours (essence + gasoil confondus) — sert
     // de base pour estimer combien de jours il reste avant une rupture de stock.
@@ -3300,22 +4468,34 @@ function DashboardView({ db }) {
       }
     }
 
-    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, ecartCaisse, ecartCaisseIncoherent, ecartStock, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
-  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, db.bons, db.pompes]);
+    return { station: s, vEssence, vGasoil, ca, stock, stockDate: lastStockDate, caisse, caisseDate: lastCaisseDate, totalVersements, rythme7j, stockTotalActuel, fondRoulement, joursAvantRupture, statutStock };
+  }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.versements, monthPrefix]);
 
   const stationsEnAlerte = rows.filter((r) => r.statutStock === "alerte");
+  const cuvesEnAlerte = useMemo(() => db.stations.flatMap((s) => etatCuvesStation(db, s.id).liste.filter((x) => x.statut === "alerte" || x.statut === "critique").map((x) => ({ ...x, station: s }))), [db]);
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h2 className="smi-display text-2xl">Tableau de bord</h2>
-        <p className="text-sm" style={{ color: C.textMuted }}>Cumuls sur toute la période enregistrée, station par station — mise à jour automatique à chaque saisie.</p>
+        <p className="text-sm" style={{ color: C.textMuted }}>Vue financière du réseau, puis le détail station par station ({monthLabel(new Date().getMonth())}) — mise à jour automatique à chaque saisie.</p>
       </div>
+
+      {db.stations.length > 0 && <FinanceOverview db={db} />}
+
+      <h3 className="smi-display text-lg mt-2">Stations — mois en cours</h3>
 
       {stationsEnAlerte.length > 0 && (
         <Card style={{ background: C.dangerSoft, border: `1px solid ${C.danger}` }}>
           <p className="text-sm font-semibold flex items-center gap-1.5" style={{ color: C.danger }}><AlertTriangle size={16} /> {stationsEnAlerte.length} station{stationsEnAlerte.length > 1 ? "s" : ""} sous le fond de roulement — commande à déclencher</p>
           <p className="text-xs mt-1" style={{ color: C.danger }}>{stationsEnAlerte.map((r) => r.station.nom).join(", ")}</p>
+        </Card>
+      )}
+
+      {cuvesEnAlerte.length > 0 && (
+        <Card style={{ background: C.amberSoft, border: `1px solid ${C.amber}` }}>
+          <p className="text-sm font-semibold flex items-center gap-1.5" style={{ color: C.amber }}><Droplet size={16} /> {cuvesEnAlerte.length} cuve{cuvesEnAlerte.length > 1 ? "s" : ""} sous le seuil d'alerte</p>
+          <p className="text-xs mt-1" style={{ color: C.textMuted }}>{cuvesEnAlerte.map((x) => `${x.station.nom} — ${x.cuve.nom} (${x.pct} %${x.statut === "critique" ? ", critique" : ""})`).join(" · ")}</p>
         </Card>
       )}
 
@@ -3334,35 +4514,11 @@ function DashboardView({ db }) {
                 <Pill tone="amber">{devise}</Pill>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Essence (cumul)</p><GaugeNumber value={fmtVol(r.vEssence)} tone="amber" /></div>
-                <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (cumul)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Essence (mois)</p><GaugeNumber value={fmtVol(r.vEssence)} tone="amber" /></div>
+                <div><p className="text-xs" style={{ color: C.textFaint }}>Gasoil (mois)</p><GaugeNumber value={fmtVol(r.vGasoil)} tone="teal" /></div>
               </div>
-              <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (cumul)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
-              <div><p className="text-xs" style={{ color: C.textFaint }}>Versements (cumul)</p><GaugeNumber value={fmtMontant(r.totalVersements, devise)} tone="muted" /></div>
-              <div className="rounded-md p-3" style={{ background: r.ecartCaisseIncoherent ? C.dangerSoft : C.amberSoft, border: `1px solid ${r.ecartCaisseIncoherent ? C.danger : C.amberDim}` }}>
-                <p className="text-xs uppercase font-semibold mb-1" style={{ color: r.ecartCaisseIncoherent ? C.danger : C.amber }}>Écart de caisse (non versé)</p>
-                <GaugeNumber value={fmtMontant(r.ecartCaisse, devise)} tone={r.ecartCaisseIncoherent ? "danger" : "amber"} />
-                <p className="text-[10px] mt-1" style={{ color: C.textFaint }}>{r.station.caisseReferenceDate ? `Depuis la caisse de référence du ${fmtDateLong(r.station.caisseReferenceDate)}` : "Depuis toute la saisie de la station (aucune caisse de référence définie)"} — montant théorique restant à verser à ce jour.</p>
-                {r.ecartCaisseIncoherent && (
-                  <p className="text-xs font-semibold mt-1.5 flex items-center gap-1" style={{ color: C.danger }}><AlertTriangle size={13} /> Ne correspond pas à la Caisse attendue du {fmtDateLong(r.caisseDate)} ({fmtMontant(r.caisse.caisseAttendue, devise)}) — vérifiez « Caisse précédente » sur ce relevé.</p>
-                )}
-              </div>
-              {r.ecartStock && (
-                <div className="rounded-md p-3" style={{ background: C.tealSoft, border: `1px solid color-mix(in srgb, ${C.teal} 40%, transparent)` }}>
-                  <p className="text-xs uppercase font-semibold mb-1.5" style={{ color: C.teal }}>Écart de stock cuve (cumulé depuis {fmtDateLong(r.ecartStock.dateDepart)})</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <p className="text-[10px]" style={{ color: C.textFaint }}>Essence</p>
-                      <GaugeNumber value={r.ecartStock.ecartEssence !== null ? `${r.ecartStock.ecartEssence >= 0 ? "+" : ""}${fmtVol(r.ecartStock.ecartEssence)}` : "—"} tone={r.ecartStock.ecartEssence !== null && r.ecartStock.ecartEssence < 0 ? "danger" : "amber"} />
-                    </div>
-                    <div>
-                      <p className="text-[10px]" style={{ color: C.textFaint }}>Gasoil</p>
-                      <GaugeNumber value={r.ecartStock.ecartGasoil !== null ? `${r.ecartStock.ecartGasoil >= 0 ? "+" : ""}${fmtVol(r.ecartStock.ecartGasoil)}` : "—"} tone={r.ecartStock.ecartGasoil !== null && r.ecartStock.ecartGasoil < 0 ? "danger" : "teal"} />
-                    </div>
-                  </div>
-                  <p className="text-[10px] mt-1.5" style={{ color: C.textFaint }}>Stock physique jaugé au {fmtDateLong(r.ecartStock.dateActuelle)} moins stock théorique (stock de départ + réceptions − volumes pompés depuis le premier relevé). Négatif = manquant en cuve.</p>
-                </div>
-              )}
+              <div><p className="text-xs" style={{ color: C.textFaint }}>Chiffre d'affaires (mois)</p><GaugeNumber value={fmtMontant(r.ca, devise)} /></div>
+              <div><p className="text-xs" style={{ color: C.textFaint }}>Versements (mois)</p><GaugeNumber value={fmtMontant(r.totalVersements, devise)} tone="muted" /></div>
               <div className="grid grid-cols-2 gap-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
                 <div>
                   <p className="text-xs" style={{ color: C.textFaint }}>Stock actuel {r.stockDate ? `(${fmtDateLong(r.stockDate)})` : ""}</p>
@@ -3748,7 +4904,7 @@ function PassationsView({ db, setDb, profile }) {
     }
     const lastCaisseDate = [...db.caisses].filter((x) => x.stationId === stationId && x.date <= date).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.date;
     if (lastCaisseDate) {
-      const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, lastCaisseDate);
+      const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, lastCaisseDate, db.depenses, db.reglementsClients);
       setCaisseMontant(String(Math.round(c.caisseAttendue)));
     }
   };
@@ -3879,7 +5035,7 @@ function PassationsView({ db, setDb, profile }) {
                 </div>
               </div>
               <div className="hidden smi-print-only mb-4">
-                <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Fiche de passation</h1>
+                <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Fiche de passation</h1>
               </div>
               <div className="flex flex-col gap-2 text-sm">
                 <p><span style={{ color: C.textFaint }}>Station :</span> <span className="font-semibold">{st?.nom}</span></p>
@@ -4035,7 +5191,7 @@ function RapportHebdomadaireView({ db, profile }) {
 
       <Card className="smi-print-area">
         <div className="hidden smi-print-only mb-3">
-          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport hebdomadaire</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Rapport hebdomadaire</h1>
           <p style={{ fontSize: 13, color: "#444" }}>{station?.nom || "Toutes stations"} — Semaine du {fmtDateLong(start)} au {fmtDateLong(end)}</p>
         </div>
 
@@ -4249,7 +5405,7 @@ function RapportHebdomadaireView({ db, profile }) {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <QrCode value={appUrl} size={64} />
             <div>
-              <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+              <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
               <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
             </div>
           </div>
@@ -4358,7 +5514,7 @@ function RapportMensuelView({ db }) {
 
       <div className="smi-print-area flex flex-col gap-4">
         <div className="hidden smi-print-only mb-2">
-          <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport mensuel</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Rapport mensuel</h1>
           <p style={{ fontSize: 13, color: "#444" }}>{monthLabel(month)} {year}{stationId && results[0] ? ` — ${results[0].station.nom}` : " — Toutes stations"}</p>
         </div>
 
@@ -4437,7 +5593,7 @@ function RapportMensuelView({ db }) {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <QrCode value={appUrl} size={64} />
             <div>
-              <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+              <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
               <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
             </div>
           </div>
@@ -4460,7 +5616,7 @@ function RapportJournalierView({ db, profile }) {
     const stockRec = db.stocks.find((x) => x.stationId === s.id && x.date === date);
     const stock = stockRec ? computeStock(db.releves, db.stocks, s.id, date) : null;
     const caisseRec = db.caisses.find((x) => x.stationId === s.id && x.date === date);
-    const caisse = caisseRec ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, date) : null;
+    const caisse = caisseRec ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, s.id, date, db.depenses, db.reglementsClients) : null;
     const inspections = db.inspections.filter((i) => i.stationId === s.id && i.date === date);
     return { station: s, v, stock, caisse, inspections };
   }), [db.stations, db.releves, db.ventes, db.stocks, db.caisses, db.inspections, date]);
@@ -4491,7 +5647,7 @@ function RapportJournalierView({ db, profile }) {
 
   const vJour = stationId ? computeVente(db.releves, db.ventes, stationId, date) : null;
   const stockJour = stationId ? computeStock(db.releves, db.stocks, stationId, date) : null;
-  const caisseJour = stationId ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, date) : null;
+  const caisseJour = stationId ? computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, stationId, date, db.depenses, db.reglementsClients) : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -4514,7 +5670,7 @@ function RapportJournalierView({ db, profile }) {
         // Aucune station choisie : synthèse comparative de toutes les stations.
         <div className="smi-print-area">
           <div className="hidden smi-print-only mb-4">
-            <h1 style={{ fontSize: 20, fontWeight: 700 }}>SMI SARL — Rapport journalier</h1>
+            <h1 style={{ fontSize: 20, fontWeight: 700 }}>{nomSociete()} — Rapport journalier</h1>
             <p style={{ fontSize: 13, color: "#444" }}>{fmtDateLong(date)}</p>
           </div>
           <Card>
@@ -4576,7 +5732,7 @@ function RapportJournalierView({ db, profile }) {
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <QrCode value={appUrl} size={64} />
               <div>
-                <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+                <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
                 <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
               </div>
             </div>
@@ -4792,7 +5948,7 @@ function RapportJournalierView({ db, profile }) {
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <QrCode value={appUrl} size={64} />
               <div>
-                <p style={{ fontSize: 11, fontWeight: 600 }}>SMI SARL — Gestion réseau stations-service</p>
+                <p style={{ fontSize: 11, fontWeight: 600 }}>{nomSociete()} — {APP_NAME}</p>
                 <p style={{ fontSize: 10, color: "#555" }}>Scannez pour ouvrir l'application — {appUrl}</p>
               </div>
             </div>
@@ -4803,9 +5959,499 @@ function RapportJournalierView({ db, profile }) {
   );
 }
 
+/* ------------------------- Sauvegarde & import de données ------------------------- */
+
+// Libellés lisibles des collections, pour l'aperçu avant import.
+const COLLECTION_LABELS = {
+  stations: "Stations", pompes: "Pompes", releves: "Relevés pompes", ventes: "Ventes (prix)",
+  stocks: "Contrôles stock", caisses: "Caisses", inspections: "Inspections", receptions: "Réceptions",
+  mouvements: "Mouvements pompiste", versements: "Versements", bons: "Bons", pompistes: "Comptes pompistes",
+  gerants: "Comptes gérants", partenaires: "Partenaires", commandesPartenaires: "Commandes partenaires",
+  versementsPartenaires: "Versements partenaires", commandesReseau: "Commandes réseau", passations: "Passations", cuves: "Cuves", fournisseurs: "Fournisseurs", paiementsFournisseurs: "Paiements fournisseurs", depenses: "Dépenses", clients: "Clients à crédit", reglementsClients: "Règlements clients", factures: "Factures", parametres: "Paramètres", profils: "Profils de droits", utilisateurs: "Comptes du siège", comptesStations: "Comptes stations",
+};
+
+// Pour les saisies journalières, l'application suppose une seule fiche par station et par
+// jour (et par pompe pour les relevés). À l'import, une ligne qui tombe sur une fiche déjà
+// existante la remplace (en gardant son identifiant) au lieu de créer un doublon.
+const NATURAL_KEYS = {
+  releves: (r) => `${r.stationId}|${r.pompeId}|${r.date}`,
+  ventes: (r) => `${r.stationId}|${r.date}`,
+  stocks: (r) => `${r.stationId}|${r.date}`,
+  caisses: (r) => `${r.stationId}|${r.date}`,
+  // Un versement déjà saisi à la main (même station, même jour, même montant total) n'est
+  // pas recréé : il est simplement mis à jour.
+  versements: (r) => `${r.stationId}|${r.date}|${versementTotal(r)}`,
+  receptions: (r) => `${r.stationId}|${r.date}|${r.produit}|${num(r.quantite)}`,
+  bons: (r) => `${r.stationId}|${r.date}|${r.libelle || ""}|${bonTotal(r)}`,
+};
+
+// Prépare la fusion d'un fichier importé dans la base actuelle, sans rien enregistrer :
+// renvoie la base résultante et un résumé (ajouts / remplacements / lignes ignorées).
+// Un fichier préparé hors de l'application (ex. depuis un suivi Excel) ne connaît pas les
+// identifiants internes : il peut désigner la station par son nom (stationNom) et la pompe
+// par son nom ou son numéro (pompeNom : « Pompe 1 », « P1 »...). On les retrouve ici, de
+// façon tolérante (accents, majuscules, préfixe « SMI » ignorés).
+const normNom = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/\bSMI\b/g, "").replace(/[^A-Z0-9]/g, "");
+const numeroPompe = (s) => { const m = String(s || "").match(/\d+/); return m ? Number(m[0]) : null; };
+
+function resolveNoms(db, incoming, warnings) {
+  const stations = db.stations || [];
+  const findStation = (nom) => {
+    const n = normNom(nom);
+    if (!n) return null;
+    return stations.find((s) => normNom(s.nom) === n) || stations.find((s) => { const m = normNom(s.nom); return m && (m.includes(n) || n.includes(m)); }) || null;
+  };
+  const findPompe = (stationId, nom) => {
+    const list = (db.pompes || []).filter((p) => p.stationId === stationId);
+    const n = normNom(nom);
+    const byName = list.find((p) => normNom(p.nom) === n);
+    if (byName) return byName;
+    const num = numeroPompe(nom);
+    return num === null ? null : list.find((p) => numeroPompe(p.nom) === num) || null;
+  };
+  const unknownStations = new Set();
+  const unknownPompes = new Set();
+  const out = { ...incoming };
+  for (const key of COLLECTIONS) {
+    if (!Array.isArray(incoming[key])) continue;
+    out[key] = incoming[key].map((raw) => {
+      if (!raw || typeof raw !== "object" || (!raw.stationNom && !raw.pompeNom)) return raw;
+      const { stationNom, pompeNom, ...row } = raw;
+      if (!row.stationId && stationNom) {
+        const st = findStation(stationNom);
+        if (st) row.stationId = st.id; else { unknownStations.add(stationNom); row.stationId = "__inconnue__"; }
+      }
+      if (!row.pompeId && pompeNom && row.stationId !== "__inconnue__") {
+        const po = findPompe(row.stationId, pompeNom);
+        if (po) row.pompeId = po.id; else { unknownPompes.add(`${stationNom || ""} ${pompeNom}`.trim()); return null; }
+      }
+      return row;
+    });
+  }
+  if (unknownStations.size) warnings.push(`Station(s) introuvable(s) dans l'application : ${[...unknownStations].join(", ")}. Créez-les (ou corrigez leur nom) puis réimportez.`);
+  if (unknownPompes.size) warnings.push(`Pompe(s) introuvable(s) : ${[...unknownPompes].join(", ")}.`);
+  return out;
+}
+
+function planImport(db, incomingRaw) {
+  const summary = [];
+  const warnings = [];
+  const incoming = resolveNoms(db, incomingRaw, warnings);
+  const next = { ...db };
+  const knownStationIds = new Set([...(db.stations || []), ...((incoming.stations) || [])].map((s) => s.id));
+  for (const key of COLLECTIONS) {
+    const rows = incoming[key];
+    if (!Array.isArray(rows) || rows.length === 0) continue;
+    const current = [...(db[key] || [])];
+    const byId = new Map(current.map((x, i) => [x.id, i]));
+    const natKey = NATURAL_KEYS[key];
+    const byNat = natKey ? new Map(current.map((x, i) => [natKey(x), i])) : null;
+    let added = 0, replaced = 0, skipped = 0;
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") { skipped++; continue; }
+      const row = { ...raw };
+      if (key !== "stations" && "stationId" in row && row.stationId && !knownStationIds.has(row.stationId)) { skipped++; continue; }
+      if (row.date && isFutureDate(row.date)) { skipped++; continue; }
+      let idx = row.id ? byId.get(row.id) : undefined;
+      if (idx === undefined && byNat) idx = byNat.get(natKey(row));
+      if (idx !== undefined) {
+        row.id = current[idx].id;
+        current[idx] = { ...current[idx], ...row };
+        replaced++;
+      } else {
+        if (!row.id) row.id = uid();
+        current.push(row);
+        byId.set(row.id, current.length - 1);
+        if (byNat) byNat.set(natKey(row), current.length - 1);
+        added++;
+      }
+    }
+    next[key] = current;
+    summary.push({ key, label: COLLECTION_LABELS[key] || key, added, replaced, skipped });
+    if (skipped > 0) warnings.push(`${COLLECTION_LABELS[key] || key} : ${skipped} ligne(s) ignorée(s) (station inconnue, date future ou ligne invalide).`);
+  }
+  return { next, summary, warnings };
+}
+
+function SauvegardeImportCard({ db, setDb, profile }) {
+  const fileRef = useRef(null);
+  const [plan, setPlan] = useState(null); // { next, summary, warnings, fileName }
+  const [msg, setMsg] = useState(null);
+
+  const exportBackup = () => {
+    const data = { app: "smi-gestion", version: 1, exportedAt: new Date().toISOString() };
+    COLLECTIONS.forEach((k) => { data[k] = db[k] || []; });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sauvegarde-smi-${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const onFile = async (e) => {
+    setMsg(null); setPlan(null);
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const incoming = JSON.parse(await file.text());
+      if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) throw new Error("format");
+      const p = planImport(db, incoming);
+      if (p.summary.length === 0) { setMsg({ type: "err", text: "Ce fichier ne contient aucune donnée reconnue par l'application." }); return; }
+      setPlan({ ...p, fileName: file.name });
+    } catch {
+      setMsg({ type: "err", text: "Fichier illisible. Utilisez un fichier .json de sauvegarde ou préparé pour l'import." });
+    }
+  };
+
+  const confirmImport = () => {
+    if (!plan) return;
+    const total = plan.summary.reduce((s, x) => s + x.added + x.replaced, 0);
+    const next = withAudit(plan.next, { user: profile?.name, role: profile?.role, stationId: null, entity: "import", action: "import de données", before: null, after: { fichier: plan.fileName, lignes: total } });
+    setDb(next);
+    setPlan(null);
+    setMsg({ type: "ok", text: `Import terminé : ${total} ligne(s) enregistrée(s).` });
+  };
+
+  return (
+    <Card className="max-w-2xl">
+      <h3 className="font-semibold mb-1">Sauvegarde et import de données</h3>
+      <p className="text-sm mb-3" style={{ color: C.textMuted }}>
+        Téléchargez une copie complète des données, ou importez un fichier .json (sauvegarde, ou saisies préparées hors de l'application). Une fiche du même jour pour la même station est remplacée, pas dupliquée.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="ghost" onClick={exportBackup}><Download size={16} /> Télécharger une sauvegarde</Button>
+        <Button onClick={() => fileRef.current?.click()}><Upload size={16} /> Importer un fichier</Button>
+        <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={onFile} />
+      </div>
+      <p className="text-xs mt-2" style={{ color: C.textMuted }}>La sauvegarde contient aussi les comptes gérants et pompistes : gardez-la en lieu sûr.</p>
+
+      {plan && (
+        <div className="mt-4 rounded-md p-3" style={{ background: C.bgAlt, border: `1px solid ${C.border}` }}>
+          <p className="text-sm font-semibold mb-2">Aperçu de « {plan.fileName} »</p>
+          <table className="w-full text-sm">
+            <thead><tr style={{ color: C.textMuted }}><th className="text-left py-1">Données</th><th className="text-right">Ajouts</th><th className="text-right">Remplacements</th><th className="text-right">Ignorées</th></tr></thead>
+            <tbody>
+              {plan.summary.map((s) => (
+                <tr key={s.key}><td className="py-1">{s.label}</td><td className="text-right">{s.added}</td><td className="text-right">{s.replaced}</td><td className="text-right">{s.skipped}</td></tr>
+              ))}
+            </tbody>
+          </table>
+          {plan.warnings.map((w, i) => (
+            <p key={i} className="text-xs flex items-center gap-1.5 mt-2" style={{ color: C.danger }}><AlertTriangle size={13} /> {w}</p>
+          ))}
+          <div className="flex justify-end gap-2 mt-3">
+            <Button variant="ghost" onClick={() => setPlan(null)}>Annuler</Button>
+            <Button onClick={confirmImport}>Confirmer l'import</Button>
+          </div>
+        </div>
+      )}
+
+      {msg && (
+        <p className="text-xs flex items-center gap-1.5 mt-3" style={{ color: msg.type === "ok" ? C.success : C.danger }}>
+          {msg.type === "ok" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />} {msg.text}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/* ------------------------- Espace propriétaire (super-admin) ------------------------- */
+
+// Accessible à l'adresse de l'application suivie de « #proprietaire ». Réservé au
+// propriétaire de Gestion StationPro : création et suivi des sociétés clientes.
+const SUPER_PWD_KEY = "gsp_super_pwd";
+const addMonths = (iso, n) => {
+  const base = iso && iso >= todayISO() ? new Date(iso + "T00:00:00") : new Date(todayISO() + "T00:00:00");
+  base.setMonth(base.getMonth() + n);
+  return base.toISOString().slice(0, 10);
+};
+
+function ProprietaireView() {
+  const [pwd, setPwd] = useState(() => { try { return sessionStorage.getItem(SUPER_PWD_KEY) || ""; } catch { return ""; } });
+  const [pwdInput, setPwdInput] = useState("");
+  const [list, setList] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ code: "", nom: "", adminPin: "", expireLe: addMonths("", 1), contact: "" });
+  const [pinFor, setPinFor] = useState(null);
+  const [newPin, setNewPin] = useState("");
+
+  const api = async (body, password = pwd) => {
+    const r = await fetch("/api/superadmin", { method: "POST", headers: { "Content-Type": "application/json", "x-super-password": password }, body: JSON.stringify(body) });
+    let data = {};
+    try { data = await r.json(); } catch { /* vide */ }
+    if (r.status === 401) { try { sessionStorage.removeItem(SUPER_PWD_KEY); } catch { /* */ } setPwd(""); }
+    if (!r.ok) throw new Error(data.error || `Erreur ${r.status}`);
+    return data;
+  };
+
+  const refresh = async (password = pwd) => {
+    try { const d = await api({ action: "list" }, password); setList(d.tenants); }
+    catch (e) { setMsg({ type: "err", text: e.message }); }
+  };
+
+  useEffect(() => { if (pwd) refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const unlock = async () => {
+    setMsg(null); setBusy(true);
+    try {
+      const d = await api({ action: "list" }, pwdInput);
+      try { sessionStorage.setItem(SUPER_PWD_KEY, pwdInput); } catch { /* */ }
+      setPwd(pwdInput); setList(d.tenants); setPwdInput("");
+    } catch (e) { setMsg({ type: "err", text: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  const run = async (body, okText) => {
+    setMsg(null); setBusy(true);
+    try { await api(body); setMsg({ type: "ok", text: okText }); await refresh(); return true; }
+    catch (e) { setMsg({ type: "err", text: e.message }); return false; }
+    finally { setBusy(false); }
+  };
+
+  const create = async () => {
+    const ok = await run({ action: "create", ...form }, `Société « ${form.nom} » créée. Code société : ${form.code.trim().toLowerCase()}`);
+    if (ok) setForm({ code: "", nom: "", adminPin: "", expireLe: addMonths("", 1), contact: "" });
+  };
+
+  const inputStyle = { background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text };
+  const inp = (props) => <input className="smi-input w-full rounded-md px-3 py-2 text-sm" style={inputStyle} {...props} />;
+
+  const Msg = () => msg && (
+    <p className="text-sm flex items-center gap-1.5 my-3" style={{ color: msg.type === "ok" ? C.success : C.danger }}>
+      {msg.type === "ok" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />} {msg.text}
+    </p>
+  );
+
+  if (!pwd) {
+    return (
+      <div className="smi-root min-h-screen flex items-center justify-center p-6">
+        <StyleInjector />
+        <Card className="w-full max-w-sm">
+          <div className="flex items-center gap-3 mb-4"><Logo size={36} /><div><p className="smi-display text-xl leading-none">{APP_NAME}</p><p className="text-xs" style={{ color: C.textMuted }}>Espace propriétaire</p></div></div>
+          <Field label="Mot de passe propriétaire">{inp({ type: "password", value: pwdInput, onChange: (e) => setPwdInput(e.target.value), onKeyDown: (e) => { if (e.key === "Enter" && pwdInput) unlock(); } })}</Field>
+          <Msg />
+          <Button className="w-full justify-center mt-3" disabled={!pwdInput || busy} onClick={unlock}>{busy ? "Vérification…" : "Ouvrir"}</Button>
+        </Card>
+      </div>
+    );
+  }
+
+  const today = todayISO();
+  const dans7j = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const statut = (t) => t.statut === "suspendu" ? { text: "Suspendu", color: C.danger }
+    : (t.expireLe && t.expireLe < today) ? { text: "Expiré", color: C.danger }
+    : (t.expireLe && t.expireLe <= dans7j) ? { text: "Expire bientôt", color: C.amber }
+    : { text: "Actif", color: C.success };
+
+  return (
+    <div className="smi-root min-h-screen p-4 md:p-8">
+      <StyleInjector />
+      <div className="max-w-5xl mx-auto flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3"><Logo size={36} /><div><p className="smi-display text-2xl leading-none">{APP_NAME}</p><p className="text-xs" style={{ color: C.textMuted }}>Espace propriétaire — sociétés clientes</p></div></div>
+          <Button variant="ghost" onClick={() => { try { sessionStorage.removeItem(SUPER_PWD_KEY); } catch { /* */ } setPwd(""); setList(null); }}><LogOut size={14} /> Fermer</Button>
+        </div>
+        <Msg />
+
+        <Card>
+          <h3 className="font-semibold mb-3">Sociétés ({list ? list.length : "…"})</h3>
+          {!list ? <Loader2 className="animate-spin" size={20} style={{ color: C.amber }} /> : list.length === 0 ? <p className="text-sm" style={{ color: C.textMuted }}>Aucune société pour l'instant.</p> : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr style={{ color: C.textMuted }}><th className="text-left py-1.5 pr-3">Société</th><th className="text-left pr-3">Code</th><th className="text-left pr-3">Statut</th><th className="text-left pr-3">Fin d'abonnement</th><th className="text-right pr-3">Stations</th><th className="text-left pr-3">Dernière saisie</th><th></th></tr></thead>
+                <tbody>
+                  {list.map((t) => { const st = statut(t); return (
+                    <tr key={t.code} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <td className="py-2 pr-3"><p className="font-medium">{t.nom}</p>{t.contact && <p className="text-xs" style={{ color: C.textFaint }}>{t.contact}</p>}</td>
+                      <td className="pr-3 smi-mono">{t.code}</td>
+                      <td className="pr-3" style={{ color: st.color }}>{st.text}</td>
+                      <td className="pr-3">{t.expireLe ? fmtDateLong(t.expireLe) : "Sans limite"}</td>
+                      <td className="pr-3 text-right">{t.nbStations}</td>
+                      <td className="pr-3 text-xs">{t.derniereSaisie ? new Date(t.derniereSaisie).toLocaleString("fr-FR") : "—"}</td>
+                      <td className="py-2">
+                        <div className="flex flex-wrap gap-1 justify-end">
+                          <Button variant="ghost" disabled={busy} onClick={() => run({ action: "update", code: t.code, expireLe: addMonths(t.expireLe, 1) }, `${t.nom} : prolongé d'un mois.`)}>+1 mois</Button>
+                          {t.statut === "suspendu"
+                            ? <Button variant="ghost" disabled={busy} onClick={() => run({ action: "update", code: t.code, statut: "actif" }, `${t.nom} : réactivé.`)}>Réactiver</Button>
+                            : <Button variant="ghost" disabled={busy} onClick={() => { if (confirm(`Suspendre l'accès de ${t.nom} ?`)) run({ action: "update", code: t.code, statut: "suspendu" }, `${t.nom} : suspendu.`); }}>Suspendre</Button>}
+                          <Button variant="ghost" disabled={busy} onClick={() => { setPinFor(t.code); setNewPin(""); }}>Code PIN</Button>
+                        </div>
+                        {pinFor === t.code && (
+                          <div className="flex gap-2 mt-2 justify-end">
+                            <input className="smi-input rounded-md px-2 py-1 text-sm w-28" style={inputStyle} type="password" inputMode="numeric" placeholder="Nouveau PIN" value={newPin} onChange={(e) => setNewPin(e.target.value)} />
+                            <Button disabled={busy || newPin.trim().length < 4} onClick={async () => { if (await run({ action: "resetPin", code: t.code, adminPin: newPin }, `${t.nom} : code PIN administrateur changé.`)) setPinFor(null); }}>OK</Button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ); })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        <Card className="max-w-2xl">
+          <h3 className="font-semibold mb-1">Nouvelle société cliente</h3>
+          <p className="text-sm mb-3" style={{ color: C.textMuted }}>Communiquez ensuite au client son code société et son code PIN administrateur. Il crée lui-même ses stations, gérants et pompistes.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Nom de la société">{inp({ value: form.nom, onChange: (e) => setForm({ ...form, nom: e.target.value }), placeholder: "ex : Kaloum Pétrole SARL" })}</Field>
+            <Field label="Code société" hint="Lettres et chiffres, sans espace. C'est ce que le client tape pour se connecter.">{inp({ value: form.code, onChange: (e) => setForm({ ...form, code: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "") }), placeholder: "ex : kaloumpetrole", autoCapitalize: "none" })}</Field>
+            <Field label="Code PIN administrateur (provisoire)">{inp({ value: form.adminPin, onChange: (e) => setForm({ ...form, adminPin: e.target.value }), inputMode: "numeric", placeholder: "4 chiffres minimum" })}</Field>
+            <Field label="Fin d'abonnement" hint="Laissez vide pour un accès sans limite.">{inp({ type: "date", value: form.expireLe || "", onChange: (e) => setForm({ ...form, expireLe: e.target.value }) })}</Field>
+            <Field label="Contact (facultatif)">{inp({ value: form.contact, onChange: (e) => setForm({ ...form, contact: e.target.value }), placeholder: "Nom et téléphone du responsable" })}</Field>
+          </div>
+          <div className="flex justify-end mt-4">
+            <Button disabled={busy || !form.nom.trim() || form.code.trim().length < 2 || form.adminPin.trim().length < 4} onClick={create}><Plus size={16} /> Créer la société</Button>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ Profils et droits ------------------------------ */
+
+const PROFILS_PROPOSES = [
+  { nom: "Caissier", type: "gerant", modules: ["ventes", "caisse", "versement", "bons", "clients", "rapport_jour"] },
+  { nom: "Responsable stock", type: "gerant", modules: ["releve", "stock", "cuves", "reception", "rapport_jour"] },
+  { nom: "Comptable (siège)", type: "siege", modules: ["dashboard", "versement", "bons", "clients", "depenses", "fournisseurs", "resultat", "rapport", "rapport_hebdo", "exports"] },
+  { nom: "Direction (siège)", type: "siege", modules: ["dashboard", "commandes_reseau", "cuves", "resultat", "rapport", "rapport_hebdo", "rapport_jour", "exports", "journal"] },
+];
+
+function modulesPourType(type) {
+  const role = type === "siege" ? "admin" : "gerant";
+  return TABS.filter((t) => t.key !== "guide" && t.key !== "securite" && (t.roles ? t.roles.includes(role) : (role === "admin" || !t.adminOnly)));
+}
+
+function DroitsCard({ db, setDb, profile }) {
+  const profils = db.profils || [];
+  const users = db.utilisateurs || [];
+  const [form, setForm] = useState(null);
+  const [uForm, setUForm] = useState(null);
+  const [resetId, setResetId] = useState(null);
+  const [newPass, setNewPass] = useState("");
+  const [err, setErr] = useState("");
+  const audit = (next, e) => withAudit(next, { user: profile?.name, role: profile?.role, ...e });
+
+  const saveProfil = () => {
+    setErr("");
+    if (!form.nom.trim()) { setErr("Indiquez le nom du profil."); return; }
+    if (!form.modules.length) { setErr("Cochez au moins un module."); return; }
+    const row = { id: form.id || uid(), nom: form.nom.trim(), type: form.type, modules: form.modules };
+    setDb(audit({ ...db, profils: form.id ? profils.map((x) => (x.id === row.id ? row : x)) : [...profils, row] }, { entity: "profil", action: form.id ? "modification" : "création", after: { nom: row.nom, modules: row.modules.length } }));
+    setForm(null);
+  };
+  const removeProfil = (x) => {
+    if ((db.gerants || []).some((g) => g.profilId === x.id) || users.some((u) => u.profilId === x.id)) { alert("Ce profil est utilisé par un compte : changez d'abord le profil de ces comptes."); return; }
+    if (!confirm(`Supprimer le profil « ${x.nom} » ?`)) return;
+    setDb(audit({ ...db, profils: profils.filter((p) => p.id !== x.id) }, { entity: "profil", action: "suppression", before: { nom: x.nom } }));
+  };
+  const creerProposes = () => {
+    const nouveaux = PROFILS_PROPOSES.filter((p) => !profils.some((x) => x.nom === p.nom)).map((p) => ({ ...p, id: uid() }));
+    setDb(audit({ ...db, profils: [...profils, ...nouveaux] }, { entity: "profil", action: "création", after: { profils: nouveaux.map((p) => p.nom).join(", ") } }));
+  };
+  const saveUser = () => {
+    setErr("");
+    if (!uForm.nom.trim()) { setErr("Indiquez le nom."); return; }
+    if (!uForm.profilId) { setErr("Choisissez un profil."); return; }
+    if (users.some((u) => u.nom.trim().toLowerCase() === uForm.nom.trim().toLowerCase())) { setErr("Un compte porte déjà ce nom."); return; }
+    if (uForm.password.trim().length < 6) { setErr("Mot de passe : 6 caractères minimum."); return; }
+    const row = { id: uid(), nom: uForm.nom.trim(), profilId: uForm.profilId, passwordHash: hashPin(uForm.password.trim()) };
+    setDb(audit({ ...db, utilisateurs: [...users, row] }, { entity: "compte siège", action: "création", after: { nom: row.nom } }));
+    setUForm(null);
+  };
+  const resetUser = (u) => {
+    if (newPass.trim().length < 6) { setErr("Mot de passe : 6 caractères minimum."); return; }
+    setDb(audit({ ...db, utilisateurs: users.map((x) => (x.id === u.id ? { ...x, passwordHash: hashPin(newPass.trim()) } : x)) }, { entity: "compte siège", action: "nouveau mot de passe", after: { nom: u.nom } }));
+    setResetId(null); setNewPass("");
+  };
+  const changeUserProfil = (u, profilId) => setDb(audit({ ...db, utilisateurs: users.map((x) => (x.id === u.id ? { ...x, profilId } : x)) }, { entity: "compte siège", action: "changement de profil", after: { nom: u.nom } }));
+  const removeUser = (u) => {
+    if (!confirm(`Supprimer le compte « ${u.nom} » ?`)) return;
+    setDb(audit({ ...db, utilisateurs: users.filter((x) => x.id !== u.id) }, { entity: "compte siège", action: "suppression", before: { nom: u.nom } }));
+  };
+  const toggle = (k) => setForm({ ...form, modules: form.modules.includes(k) ? form.modules.filter((m) => m !== k) : [...form.modules, k] });
+  const libelle = (k) => TABS.find((t) => t.key === k)?.label || k;
+
+  return (
+    <>
+      <Card className="max-w-3xl">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+          <h3 className="font-semibold">Profils de droits</h3>
+          <div className="flex gap-2">
+            {PROFILS_PROPOSES.some((p) => !profils.some((x) => x.nom === p.nom)) && <Button variant="ghost" onClick={creerProposes}>Créer les profils proposés</Button>}
+            <Button onClick={() => { setErr(""); setForm({ nom: "", type: "gerant", modules: [] }); }}><Plus size={14} /> Profil</Button>
+          </div>
+        </div>
+        <p className="text-sm mb-3" style={{ color: C.textMuted }}>Un profil « station » limite ce que voit un compte gérant (ex. Caissier, Responsable stock), toujours sur sa seule station. Un profil « siège » s'applique aux comptes du siège, qui voient toutes les stations mais seulement les modules cochés (ex. Comptable, Direction).</p>
+        {form && (
+          <div className="rounded-md p-3 mb-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+            <div className="grid md:grid-cols-2 gap-3 mb-3">
+              <Field label="Nom du profil"><input className={inputCls} style={inputSty()} value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} /></Field>
+              <Field label="S'applique à"><SelectInput value={form.type} disabled={!!form.id} onChange={(e) => setForm({ ...form, type: e.target.value, modules: [] })}><option value="gerant">Comptes de station (gérants)</option><option value="siege">Comptes du siège (toutes stations)</option></SelectInput></Field>
+            </div>
+            <p className="text-xs uppercase font-semibold mb-2" style={{ color: C.textMuted }}>Modules autorisés</p>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
+              {modulesPourType(form.type).map((t) => <label key={t.key} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.modules.includes(t.key)} onChange={() => toggle(t.key)} /> {t.label}</label>)}
+            </div>
+            {err && <p className="text-xs mt-2" style={{ color: C.danger }}>{err}</p>}
+            <div className="flex justify-end gap-2 mt-3"><Button variant="ghost" onClick={() => setForm(null)}>Annuler</Button><Button onClick={saveProfil}>Enregistrer</Button></div>
+          </div>
+        )}
+        {profils.length === 0 ? <p className="text-sm" style={{ color: C.textFaint }}>Aucun profil : les gérants ont accès à tous les modules de leur station.</p> : (
+          <div className="flex flex-col gap-2">
+            {profils.map((x) => (
+              <div key={x.id} className="rounded-md p-2.5 flex items-start justify-between gap-2" style={{ border: `1px solid ${C.border}` }}>
+                <div className="min-w-0"><p className="text-sm font-medium">{x.nom} <Pill tone={x.type === "siege" ? "teal" : "amber"}>{x.type === "siege" ? "Siège" : "Station"}</Pill></p><p className="text-xs" style={{ color: C.textFaint }}>{x.modules.map(libelle).join(" · ")}</p></div>
+                <div className="flex gap-2 flex-shrink-0"><button className="smi-btn" style={{ color: C.teal }} onClick={() => { setErr(""); setForm({ ...x }); }}><Pencil size={14} /></button><button className="smi-btn" style={{ color: C.danger }} onClick={() => removeProfil(x)}><Trash2 size={14} /></button></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="max-w-3xl">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+          <h3 className="font-semibold">Comptes du siège</h3>
+          <Button onClick={() => { setErr(""); setUForm({ nom: "", password: "", profilId: profils.find((x) => x.type === "siege")?.id || "" }); }} disabled={!profils.some((x) => x.type === "siege")}><Plus size={14} /> Compte</Button>
+        </div>
+        <p className="text-sm mb-3" style={{ color: C.textMuted }}>Pour le comptable, la direction ou un contrôleur : ils se connectent avec le profil « Siège », leur nom et leur mot de passe, sans connaître le code PIN administrateur.{!profils.some((x) => x.type === "siege") && " Créez d'abord un profil « siège »."}</p>
+        {uForm && (
+          <div className="rounded-md p-3 mb-3 grid md:grid-cols-3 gap-3" style={{ background: C.panelAlt, border: `1px solid ${C.border}` }}>
+            <Field label="Nom"><input className={inputCls} style={inputSty()} value={uForm.nom} onChange={(e) => setUForm({ ...uForm, nom: e.target.value })} /></Field>
+            <Field label="Mot de passe"><input className={inputCls} style={inputSty()} type="password" value={uForm.password} onChange={(e) => setUForm({ ...uForm, password: e.target.value })} /></Field>
+            <Field label="Profil"><SelectInput value={uForm.profilId} onChange={(e) => setUForm({ ...uForm, profilId: e.target.value })}>{profils.filter((x) => x.type === "siege").map((x) => <option key={x.id} value={x.id}>{x.nom}</option>)}</SelectInput></Field>
+            {err && <p className="text-xs md:col-span-3" style={{ color: C.danger }}>{err}</p>}
+            <div className="md:col-span-3 flex justify-end gap-2"><Button variant="ghost" onClick={() => setUForm(null)}>Annuler</Button><Button onClick={saveUser}>Créer le compte</Button></div>
+          </div>
+        )}
+        {users.length === 0 ? <p className="text-sm" style={{ color: C.textFaint }}>Aucun compte du siège.</p> : users.map((u) => (
+          <div key={u.id} className="flex flex-col gap-1.5 py-1.5" style={{ borderTop: `1px solid ${C.border}` }}>
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span>{u.nom}</span>
+              <div className="flex items-center gap-2">
+                <select className="smi-select rounded-md px-1 py-0.5 text-xs" style={{ background: C.bgAlt, border: `1px solid ${C.border}`, color: C.text }} value={u.profilId} onChange={(e) => changeUserProfil(u, e.target.value)}>{profils.filter((x) => x.type === "siege").map((x) => <option key={x.id} value={x.id}>{x.nom}</option>)}</select>
+                <button className="smi-btn" style={{ color: C.teal }} onClick={() => { setResetId(resetId === u.id ? null : u.id); setNewPass(""); setErr(""); }}><Lock size={13} /></button>
+                <button className="smi-btn" style={{ color: C.danger }} onClick={() => removeUser(u)}><Trash2 size={13} /></button>
+              </div>
+            </div>
+            {resetId === u.id && <div className="flex gap-2"><input className="smi-input flex-1 rounded-md px-2 py-1.5 text-xs" style={inputSty()} type="password" placeholder="Nouveau mot de passe" value={newPass} onChange={(e) => setNewPass(e.target.value)} /><Button onClick={() => resetUser(u)}>Valider</Button></div>}
+            {resetId === u.id && err && <p className="text-xs" style={{ color: C.danger }}>{err}</p>}
+          </div>
+        ))}
+      </Card>
+    </>
+  );
+}
+
 /* ---------------------------------- Sécurité ---------------------------------- */
 
-function SecuriteView({ profile }) {
+function SecuriteView({ db, setDb, profile }) {
   const [oldPin, setOldPin] = useState("");
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
@@ -4863,6 +6509,9 @@ function SecuriteView({ profile }) {
           </Button>
         </div>
       </Card>
+
+      {profile?.role === "admin" && !profile?.siege && <DroitsCard db={db} setDb={setDb} profile={profile} />}
+      {profile?.role === "admin" && !profile?.siege && <SauvegardeImportCard db={db} setDb={setDb} profile={profile} />}
     </div>
   );
 }
@@ -4885,6 +6534,34 @@ const GUIDE_SECTIONS = [
   {
     key: "stock", title: "Contrôle Stock", adminOnly: false,
     text: "Le stock d'ouverture du jour reprend automatiquement le stock PHYSIQUE constaté la veille (pas le stock théorique) — pour que le comptage réel serve de référence d'un jour sur l'autre. Le comptage physique du jour est pré-rempli avec ce même point de départ ; corrigez-le selon le comptage réel une fois les livraisons et ventes prises en compte, puisqu'il deviendra à son tour le stock d'ouverture du lendemain. L'écart entre stock théorique calculé et stock physique s'affiche automatiquement — un écart important mérite une vérification.",
+  },
+  {
+    key: "cuves", title: "Cuves", adminOnly: false,
+    text: "L'administrateur déclare les cuves de chaque station : produit, capacité, seuil d'alerte et seuil critique (par défaut 25 % et 10 % de la capacité). Le niveau de chaque cuve vient du dernier Contrôle Stock (stock physique jaugé, sinon stock théorique). Vous voyez le remplissage en %, la place libre avant une livraison, et le nombre de jours avant rupture au rythme des 7 derniers jours. Les cuves en alerte apparaissent aussi en haut du Tableau de bord, et la place libre s'affiche lors d'une Réception.",
+  },
+  {
+    key: "compte_station", title: "Compte station", adminOnly: false,
+    text: "Pour les stations dont les versements paient le carburant reçu du fournisseur. L'administrateur paramètre une fois : date de début du suivi, stock de roulement de départ, prix de cession essence et gasoil, fournisseur concerné et ajustement de reprise éventuel. L'appli calcule le total à verser (stock de départ + réceptions au prix de cession), les versements, bons et dépenses payées par la caisse, et le reste à verser. Le contrôle compare ce reste à ce que la station détient (stock restant + caisse non versée) en tenant compte de sa marge, et signale un manquant. Le tableau « livraison par livraison » montre quelles livraisons sont soldées.",
+  },
+  {
+    key: "exports", title: "Exports", adminOnly: true,
+    text: "Choisissez une période libre (du… au…) et, si besoin, une station, puis téléchargez en CSV (ouvrable dans Excel) : la synthèse journalière (litres, chiffre d'affaires, stocks, écarts, versements, bons, dépenses, caisse attendue et comptée), les relevés de pompes, réceptions, versements, bons, dépenses, règlements clients, paiements fournisseurs et le journal des saisies.",
+  },
+  {
+    key: "clients", title: "Clients à crédit", adminOnly: false,
+    text: "L'administrateur crée les clients en compte (entreprises, flottes), avec un plafond de crédit facultatif. Le carburant vendu à crédit se saisit dans Bons en choisissant le client (produit, immatriculation, n° de bon ; le prix du jour est proposé). Le solde de chaque client se met à jour seul, avec une alerte à 80 % du plafond. « Encaisser » enregistre un règlement ; s'il est reçu en espèces dans la caisse d'une station, il s'ajoute à la caisse attendue du jour. L'administrateur émet une facture numérotée (FAC-année-n°) pour une période et l'imprime ou l'enregistre en PDF ; le relevé montre tous les bons et règlements.",
+  },
+  {
+    key: "depenses", title: "Dépenses", adminOnly: false,
+    text: "Chaque dépense a une catégorie (salaires, électricité, maintenance, taxes…), un montant, un mode de paiement et un bénéficiaire. Celles saisies par un gérant restent « en attente » jusqu'à validation par l'administrateur, qui peut aussi les refuser. Une dépense payée en espèces avec l'argent de la caisse de la station est déduite de la caisse attendue du jour. Filtre par mois, station, catégorie et statut, et export CSV.",
+  },
+  {
+    key: "fournisseurs", title: "Fournisseurs", adminOnly: true,
+    text: "Fiche de chaque fournisseur et ce que vous lui devez. Lors d'une Réception, l'administrateur choisit le fournisseur, le prix d'achat par litre et le montant payé à la livraison : le reste s'ajoute à la dette. Le bouton Payer enregistre un règlement ultérieur (et la station qui a payé). Le détail montre toutes les livraisons et tous les paiements.",
+  },
+  {
+    key: "resultat", title: "Résultat", adminOnly: true,
+    text: "Sur la période de votre choix, par station ou pour tout le réseau : chiffre d'affaires, coût du carburant vendu (litres vendus × prix d'achat moyen des livraisons), marge brute, dépenses validées par catégorie et résultat. Affiche aussi les achats de la période, les bons et les dettes fournisseurs. Export CSV et PDF.",
   },
   {
     key: "caisse", title: "Caisse", adminOnly: false,
@@ -4916,7 +6593,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "dashboard", title: "Tableau de bord", adminOnly: true,
-    text: "Vue d'ensemble du réseau : volumes, chiffre d'affaires et versements cumulés sur toute la période enregistrée (pas seulement le mois en cours), station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi un « Écart de caisse (non versé) » recalculé depuis tout l'historique ventes/bons/versements — avec une alerte si ce montant ne correspond pas à la Caisse attendue du dernier relevé, signe d'une erreur de saisie sur « Caisse précédente » — ainsi qu'un « Écart de stock cuve » (essence et gasoil séparément), recalculé depuis le stock de départ de la toute première saisie Stock, plus toutes les réceptions, moins tout le carburant pompé (index de clôture le plus récent moins index d'ouverture du tout premier relevé de chaque pompe), comparé au dernier stock physique jaugé — un négatif signale un manquant en cuve. Chaque station affiche enfin son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture, avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
+    text: "En haut, la vue financière (filtrable par station, sur le jour, 7 jours ou le mois) : chiffre d'affaires, valeur du stock en cuve, dépenses, versements, dettes fournisseurs, résultat de l'année avec le détail mois par mois (ventes, coût du carburant, dépenses, résultat), et la courbe des entrées et sorties des 7 derniers jours. En dessous, vue d'ensemble du réseau : volumes et chiffre d'affaires du mois en cours, station par station, mis à jour automatiquement à chaque saisie d'un gérant. Chaque station affiche aussi son suivi Fond de roulement (défini dans Stations) : stock total actuel, rythme de vente moyen des 7 derniers jours, et nombre de jours estimés avant rupture — avec une alerte en haut de page dès qu'une station passe sous son seuil, pour déclencher une commande à temps.",
   },
   {
     key: "commandes_reseau", title: "Commandes", adminOnly: true,
@@ -4924,7 +6601,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "stations", title: "Stations", adminOnly: true,
-    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. La « Caisse de référence » (montant + date) et le « Stock de référence » (essence/gasoil en L + date) servent de point de départ vérifié aux écarts cumulés du Tableau de bord (Écart de caisse et Écart de stock cuve) — renseignez-y un solde compté/audité et sa date à chaque fois que vous voulez repartir d'une base sûre (comme la première ligne d'un tableau de suivi Excel), au lieu de laisser l'app recalculer depuis toute la saisie de la station. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
+    text: "Créez et modifiez les stations du réseau (nom, localisation, fournisseur, devise) — 4 pompes sont créées automatiquement avec chaque nouvelle station. Vous pouvez aussi lui assigner une couleur, reprise sur ses cartes dans Stations, Tableau de bord et Commandes pour la repérer facilement. C'est aussi ici que vous créez les comptes gérants (nom, mot de passe, station, et éventuellement un partenaire assigné).",
   },
   {
     key: "passations", title: "Passation", adminOnly: true,
@@ -4948,7 +6625,7 @@ const GUIDE_SECTIONS = [
   },
   {
     key: "securite", title: "Sécurité", adminOnly: true,
-    text: "Changez votre code PIN administrateur (ancien code requis). Les codes PIN de station se changent depuis Stations.",
+    text: "Profils de droits : limitez les modules d'un compte gérant (Caissier, Responsable stock…) ou créez des comptes du siège (Comptable, Direction…) qui voient toutes les stations mais seulement les modules cochés, avec leur propre mot de passe. Changez votre code PIN administrateur (ancien code requis). Les codes PIN de station se changent depuis Stations. Vous pouvez aussi y télécharger une sauvegarde complète des données, ou importer un fichier .json de saisies (aperçu avant confirmation ; une fiche du même jour pour la même station est remplacée, pas dupliquée ; un versement identique — même jour, même montant — n'est pas recréé).",
   },
 ];
 
@@ -5014,6 +6691,90 @@ function GuideView({ profile }) {
 
 const AUDIT_LABELS = { station: "Station", pompe: "Pompe", releve: "Relevé pompe", vente: "Vente", stock: "Contrôle stock", caisse: "Caisse", inspection: "Inspection", reception: "Réception", mouvement: "Mouvement pompiste", versement: "Versement", bon: "Bon", pompiste_compte: "Compte pompiste", gerant_compte: "Compte gérant", partenaire: "Client partenaire", commande_partenaire: "Commande partenaire", versement_partenaire: "Versement partenaire", commande_reseau: "Commande réseau", passation: "Passation" };
 
+/* ------------------------------ Exports (période libre) ------------------------------ */
+
+function ExportsView({ db }) {
+  const [du, setDu] = useState(todayISO().slice(0, 8) + "01");
+  const [au, setAu] = useState(todayISO());
+  const [stationId, setStationId] = useState("");
+  const stNom = (id) => db.stations.find((x) => x.id === id)?.nom || "";
+  const pompeNom = (id) => db.pompes.find((x) => x.id === id)?.nom || "";
+  const inP = (r) => r.date >= du && r.date <= au && (!stationId || r.stationId === stationId);
+  const suffixe = `${stationId ? stNom(stationId).replace(/\s+/g, "_") + "-" : ""}${du}_${au}`;
+  const cliNom = (id) => (db.clients || []).find((c) => c.id === id)?.nom || "";
+  const fourNom = (id) => (db.fournisseurs || []).find((f) => f.id === id)?.nom || "";
+
+  // Synthèse jour par jour et station par station : l'essentiel d'un rapport de période.
+  const synthese = () => {
+    const cles = new Set();
+    [db.releves, db.stocks, db.caisses, db.versements].forEach((l) => l.filter(inP).forEach((r) => cles.add(`${r.date}|${r.stationId}`)));
+    return [...cles].sort().map((k) => {
+      const [d, sid] = k.split("|");
+      const v = computeVente(db.releves, db.ventes, sid, d);
+      const st = computeStock(db.releves, db.stocks, sid, d);
+      const c = computeCaisse(db.releves, db.ventes, db.caisses, db.bons, db.versements, sid, d, db.depenses, db.reglementsClients);
+      return [d, stNom(sid), v.essence, v.gasoil, Math.round(v.ca), st.record ? stockAffichable(st, "essence") : "", st.record ? stockAffichable(st, "gasoil") : "", st.ecartEssence ?? "", st.ecartGasoil ?? "", Math.round(c.totalVersement), Math.round(c.totalBon), Math.round(c.totalDepenses || 0), Math.round(c.caisseAttendue), c.caisseDuJour ?? "", c.ecart ?? ""];
+    });
+  };
+
+  const jeux = [
+    { k: "synthese", t: "Synthèse journalière", d: "Litres, chiffre d'affaires, stocks, écarts, versements, bons, dépenses et caisse, par jour et par station.", n: () => synthese().length,
+      run: () => exportCsv(`synthese-${suffixe}`, ["Date", "Station", "Essence vendue (L)", "Gasoil vendu (L)", "Chiffre d'affaires", "Stock essence", "Stock gasoil", "Écart essence (L)", "Écart gasoil (L)", "Versements", "Bons", "Dépenses (caisse)", "Caisse attendue", "Caisse comptée", "Écart de caisse"], synthese()) },
+    { k: "releves", t: "Relevés des pompes", d: "Index d'ouverture et de clôture, pompe par pompe.", n: () => db.releves.filter(inP).length,
+      run: () => exportCsv(`releves-${suffixe}`, ["Date", "Station", "Pompe", "Ouverture essence", "Clôture essence", "Ouverture gasoil", "Clôture gasoil", "Litres"], db.releves.filter(inP).sort((a, b) => (a.date < b.date ? -1 : 1)).map((r) => [r.date, stNom(r.stationId), pompeNom(r.pompeId), r.indexOuvertureEssence, r.indexClotureEssence, r.indexOuvertureGasoil, r.indexClotureGasoil, Math.max(0, num(r.indexClotureEssence) - num(r.indexOuvertureEssence)) + Math.max(0, num(r.indexClotureGasoil) - num(r.indexOuvertureGasoil))])) },
+    { k: "receptions", t: "Réceptions", d: "Livraisons de carburant, fournisseur, prix d'achat et montant payé.", n: () => db.receptions.filter(inP).length,
+      run: () => exportCsv(`receptions-${suffixe}`, ["Date", "Station", "Produit", "Quantité (L)", "Fournisseur", "N° bon", "Prix d'achat", "Montant", "Payé à la livraison"], db.receptions.filter(inP).map((r) => [r.date, stNom(r.stationId), r.produit, num(r.quantite), r.fournisseur || fourNom(r.fournisseurId), r.numeroBon, r.prixAchat || prixCessionDefaut(db, r.stationId, r.produit) || "", Math.round(montantReception(r, db)) || "", r.montantPaye])) },
+    { k: "versements", t: "Versements", d: "Versements bancaires, paiements marchands, versements au compte du DG.", n: () => db.versements.filter(inP).length,
+      run: () => exportCsv(`versements-${suffixe}`, ["Date", "Station", "Banque", "N° reçu", "Versement bancaire", "Paiement marchand", "Compte du DG", "Libellé DG", "Total"], db.versements.filter(inP).map((v) => [v.date, stNom(v.stationId), v.banqueNom, v.recuNumero, v.banqueMontant, v.paiementMarchandMontant, v.autreMontant, v.autreLibelle, versementTotal(v)])) },
+    { k: "bons", t: "Bons", d: "Bons internes et ventes à crédit (client, véhicule, n° de bon).", n: () => db.bons.filter(inP).length,
+      run: () => exportCsv(`bons-${suffixe}`, ["Date", "Station", "Libellé", "Client", "Produit", "Immatriculation", "N° bon", "Quantité", "Prix", "Frais de route", "Total"], db.bons.filter(inP).map((b) => [b.date, stNom(b.stationId), b.libelle, cliNom(b.clientId), b.produit, b.immatriculation, b.numeroBon, b.quantite, b.prixUnitaire, b.fraisRoute, bonTotal(b)])) },
+    { k: "depenses", t: "Dépenses", d: "Toutes les dépenses avec catégorie et statut.", n: () => (db.depenses || []).filter(inP).length,
+      run: () => exportCsv(`depenses-${suffixe}`, ["Date", "Station", "Catégorie", "Bénéficiaire", "Description", "Mode", "Payée par la caisse", "Montant", "Statut"], (db.depenses || []).filter(inP).map((d) => [d.date, stNom(d.stationId), d.categorie, d.beneficiaire, d.description, d.mode, d.payeeParCaisse ? "oui" : "non", num(d.montant), d.statut])) },
+    { k: "reglements", t: "Règlements clients", d: "Encaissements des clients à crédit.", n: () => (db.reglementsClients || []).filter((r) => r.date >= du && r.date <= au && (!stationId || r.stationId === stationId)).length,
+      run: () => exportCsv(`reglements-clients-${suffixe}`, ["Date", "Client", "Montant", "Mode", "Station", "Reçu en caisse", "Note"], (db.reglementsClients || []).filter((r) => r.date >= du && r.date <= au && (!stationId || r.stationId === stationId)).map((r) => [r.date, cliNom(r.clientId), num(r.montant), r.mode, stNom(r.stationId), r.encaisseEnCaisse ? "oui" : "non", r.note])) },
+    { k: "paiements", t: "Paiements fournisseurs", d: "Règlements faits aux fournisseurs.", n: () => (db.paiementsFournisseurs || []).filter((r) => r.date >= du && r.date <= au && (!stationId || r.stationId === stationId)).length,
+      run: () => exportCsv(`paiements-fournisseurs-${suffixe}`, ["Date", "Fournisseur", "Montant", "Mode", "Station", "Note"], (db.paiementsFournisseurs || []).filter((r) => r.date >= du && r.date <= au && (!stationId || r.stationId === stationId)).map((r) => [r.date, fourNom(r.fournisseurId), num(r.montant), r.mode, stNom(r.stationId), r.note])) },
+    { k: "journal", t: "Journal des saisies", d: "Qui a saisi, modifié ou supprimé quoi, et quand.", n: () => (db.audit || []).filter((a) => a.ts.slice(0, 10) >= du && a.ts.slice(0, 10) <= au && (!stationId || a.stationId === stationId)).length,
+      run: () => exportCsv(`journal-${suffixe}`, ["Date et heure", "Utilisateur", "Rôle", "Station", "Élément", "Action", "Détail"], (db.audit || []).filter((a) => a.ts.slice(0, 10) >= du && a.ts.slice(0, 10) <= au && (!stationId || a.stationId === stationId)).map((a) => [new Date(a.ts).toLocaleString("fr-FR"), a.user, a.role, stNom(a.stationId), a.entity, a.action, JSON.stringify(a.after || a.before || "")])) },
+  ];
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="smi-display text-2xl">Exports</h2>
+        <p className="text-sm" style={{ color: C.textMuted }}>Toutes les données sur la période de votre choix, en fichiers CSV qui s'ouvrent dans Excel.</p>
+      </div>
+      <Card>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+          <Field label="Du"><TextInput type="date" value={du} onChange={(e) => setDu(e.target.value)} /></Field>
+          <Field label="Au"><TextInput type="date" value={au} onChange={(e) => setAu(e.target.value)} /></Field>
+          <Field label="Station"><SelectInput value={stationId} onChange={(e) => setStationId(e.target.value)}><option value="">Toutes</option>{db.stations.map((s) => <option key={s.id} value={s.id}>{s.nom}</option>)}</SelectInput></Field>
+          <div className="flex gap-1 flex-wrap">
+            {[["Ce mois", todayISO().slice(0, 8) + "01"], ["Mois dernier", null], ["Cette année", todayISO().slice(0, 4) + "-01-01"]].map(([l, a]) => (
+              <Button key={l} variant="ghost" onClick={() => {
+                if (a) { setDu(a); setAu(todayISO()); return; }
+                const d = new Date(`${todayISO().slice(0, 8)}01T12:00:00`); d.setDate(0);
+                setAu(d.toISOString().slice(0, 10)); setDu(d.toISOString().slice(0, 8) + "01");
+              }}>{l}</Button>
+            ))}
+          </div>
+        </div>
+      </Card>
+      <div className="grid md:grid-cols-2 gap-3">
+        {jeux.map((j) => {
+          const n = j.n();
+          return (
+            <Card key={j.k} className="flex items-center justify-between gap-3">
+              <div className="min-w-0"><p className="font-semibold text-sm">{j.t} <span className="text-xs font-normal" style={{ color: C.textFaint }}>· {n} ligne{n > 1 ? "s" : ""}</span></p><p className="text-xs" style={{ color: C.textMuted }}>{j.d}</p></div>
+              <Button variant="ghost" disabled={n === 0} onClick={j.run}><Download size={16} /> CSV</Button>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AuditLogView({ db }) {
   const entries = db.audit || [];
   const [stationFilter, setStationFilter] = useState("");
@@ -5066,6 +6827,27 @@ function AuditLogView({ db }) {
 
 /* ---------------------------------- App shell -------------------------------- */
 
+// Onglets visibles : ceux du rôle, puis, si le compte a un profil de droits, seulement
+// les modules cochés dans ce profil. Le guide reste toujours visible.
+function compteDuProfil(db, profile) {
+  if (profile.siege) return (db.utilisateurs || []).find((u) => u.id === profile.compteId);
+  if (profile.role === "gerant") return (db.gerants || []).find((g) => (profile.compteId ? g.id === profile.compteId : g.nom === profile.name && g.stationId === profile.stationId));
+  return null;
+}
+function ongletsAutorises(db, profile) {
+  const base = TABS.filter((t) => (t.roles ? t.roles.includes(profile.role) : (profile.role === "admin" || !t.adminOnly)));
+  const compte = compteDuProfil(db, profile);
+  const pr = compte?.profilId ? (db.profils || []).find((x) => x.id === compte.profilId) : null;
+  if (profile.siege) {
+    // Compte du siège : uniquement les modules de son profil, jamais la Sécurité.
+    const mods = new Set(pr?.modules || []);
+    return base.filter((t) => t.key === "guide" || (t.key !== "securite" && mods.has(t.key)));
+  }
+  if (!pr) return base;
+  const mods = new Set(pr.modules || []);
+  return base.filter((t) => t.key === "guide" || mods.has(t.key));
+}
+
 const TABS = [
   { key: "guide", label: "Guide d'utilisation", icon: BookOpen, adminOnly: false },
   { key: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, adminOnly: true },
@@ -5077,21 +6859,39 @@ const TABS = [
   { key: "releve", label: "Relevé Pompes", icon: Fuel, adminOnly: false },
   { key: "ventes", label: "Ventes", icon: Wallet, adminOnly: false },
   { key: "stock", label: "Contrôle Stock", icon: Warehouse, adminOnly: false },
+  { key: "cuves", label: "Cuves", icon: Droplet, roles: ["admin", "gerant"] },
   { key: "caisse", label: "Caisse", icon: Wallet, adminOnly: false },
   { key: "inspection", label: "Inspection", icon: ClipboardCheck, adminOnly: false },
   { key: "reception", label: "Réception", icon: Truck, adminOnly: false },
   { key: "versement", label: "Versement", icon: Landmark, adminOnly: false },
+  { key: "compte_station", label: "Compte station", icon: Landmark, roles: ["admin", "gerant"] },
   { key: "bons", label: "Bons", icon: Wallet, adminOnly: false },
+  { key: "clients", label: "Clients à crédit", icon: Users, roles: ["admin", "gerant"] },
+  { key: "depenses", label: "Dépenses", icon: Wallet, roles: ["admin", "gerant"] },
+  { key: "fournisseurs", label: "Fournisseurs", icon: Truck, adminOnly: true },
   { key: "mouvements", label: "Mouvements Pompiste", icon: Users, roles: ["gerant", "pompiste"] },
+  { key: "resultat", label: "Résultat", icon: LayoutDashboard, adminOnly: true },
   { key: "rapport", label: "Rapport mensuel", icon: CalendarRange, adminOnly: true },
   { key: "rapport_jour", label: "Rapport journalier", icon: Printer, adminOnly: false },
   { key: "rapport_hebdo", label: "Rapport hebdomadaire", icon: CalendarRange, adminOnly: false },
+  { key: "exports", label: "Exports", icon: Download, adminOnly: true },
   { key: "journal", label: "Journal des saisies", icon: History, adminOnly: true },
   { key: "securite", label: "Sécurité", icon: Lock, adminOnly: true },
 ];
 
 export default function App() {
-  const { db, setDb, profile, setProfile, ready, error, retrySave } = useSmiStorage();
+  const [hash, setHash] = useState(() => (typeof window !== "undefined" ? window.location.hash : ""));
+  useEffect(() => {
+    const on = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  if (hash === "#proprietaire") return <ProprietaireView />;
+  return <AppSociete />;
+}
+
+function AppSociete() {
+  const { db, setDb, profile, setProfile, ready, error, retrySave, logoutReason } = useSmiStorage();
   const [tab, setTab] = useState("guide");
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
 
@@ -5117,14 +6917,15 @@ export default function App() {
     );
   }
 
-  if (!profile) {
-    return <RoleGate db={db} onSet={setProfile} />;
+  if (!profile || !db) {
+    return <LoginScreen onLoggedIn={() => setProfile(getSession()?.profile)} reason={logoutReason} />;
   }
 
-  const visibleTabs = TABS.filter((t) => (t.roles ? t.roles.includes(profile.role) : (profile.role === "admin" || !t.adminOnly)));
+  const visibleTabs = ongletsAutorises(db, profile);
   const stationName = profile.stationId ? db.stations.find((s) => s.id === profile.stationId)?.nom : null;
 
   const renderTab = () => {
+    if (!visibleTabs.some((t) => t.key === tab)) return <GuideView profile={profile} />;
     switch (tab) {
       case "guide": return <GuideView profile={profile} />;
       case "dashboard": return <DashboardView db={db} />;
@@ -5136,6 +6937,12 @@ export default function App() {
       case "releve": return <RelevePompesView db={db} setDb={setDb} profile={profile} />;
       case "ventes": return <VentesView db={db} setDb={setDb} profile={profile} />;
       case "stock": return <StockView db={db} setDb={setDb} profile={profile} />;
+      case "cuves": return <CuvesView db={db} setDb={setDb} profile={profile} />;
+      case "clients": return <ClientsView db={db} setDb={setDb} profile={profile} />;
+      case "compte_station": return <CompteStationView db={db} setDb={setDb} profile={profile} />;
+      case "depenses": return <DepensesView db={db} setDb={setDb} profile={profile} />;
+      case "fournisseurs": return <FournisseursView db={db} setDb={setDb} profile={profile} />;
+      case "resultat": return <ResultatView db={db} />;
       case "caisse": return <CaisseView db={db} setDb={setDb} profile={profile} />;
       case "inspection": return <InspectionView db={db} setDb={setDb} profile={profile} />;
       case "reception": return <ReceptionView db={db} setDb={setDb} profile={profile} />;
@@ -5145,8 +6952,9 @@ export default function App() {
       case "rapport": return <RapportMensuelView db={db} />;
       case "rapport_jour": return <RapportJournalierView db={db} profile={profile} />;
       case "rapport_hebdo": return <RapportHebdomadaireView db={db} profile={profile} />;
+      case "exports": return <ExportsView db={db} />;
       case "journal": return <AuditLogView db={db} />;
-      case "securite": return <SecuriteView profile={profile} />;
+      case "securite": return <SecuriteView db={db} setDb={setDb} profile={profile} />;
       default: return null;
     }
   };
@@ -5160,8 +6968,8 @@ export default function App() {
         <div className="flex items-center gap-2 px-1">
           <Logo size={30} />
           <div>
-            <p className="smi-display text-xl leading-none">SMI SARL</p>
-            <p className="text-xs" style={{ color: C.textFaint }}>Réseau stations-service</p>
+            <p className="smi-display text-xl leading-none">{nomSociete()}</p>
+            <p className="text-xs" style={{ color: C.textFaint }}>{APP_NAME}</p>
           </div>
         </div>
         <nav className="flex flex-col gap-1">
@@ -5178,11 +6986,11 @@ export default function App() {
         </nav>
         <div className="mt-auto flex flex-col gap-2 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
           <div className="text-xs" style={{ color: C.textFaint }}>
-            <p className="font-semibold" style={{ color: C.textMuted }}>{profile.role === "admin" ? "Administrateur" : profile.role === "pompiste" ? "Pompiste" : "Gérant"}</p>
+            <p className="font-semibold" style={{ color: C.textMuted }}>{profile.siege ? `Siège — ${profile.name}` : profile.role === "admin" ? "Administrateur" : profile.role === "pompiste" ? "Pompiste" : "Gérant"}</p>
             {stationName && <p>{stationName}</p>}
           </div>
           <Button variant="ghost" onClick={() => setShowDisplaySettings(true)}><Settings2 size={14} /> Affichage</Button>
-          <Button variant="ghost" onClick={() => setProfile(null)}><LogOut size={14} /> Changer de profil</Button>
+          <Button variant="ghost" onClick={() => setProfile(null)}><LogOut size={14} /> Se déconnecter</Button>
         </div>
       </aside>
 
@@ -5190,7 +6998,7 @@ export default function App() {
       <header className="md:hidden flex items-center justify-between px-4 py-3 smi-no-print" style={{ background: C.bgAlt, borderBottom: `1px solid ${C.border}` }}>
         <div className="flex items-center gap-2">
           <Logo size={24} />
-          <p className="smi-display text-lg leading-none">SMI SARL</p>
+          <p className="smi-display text-lg leading-none">{nomSociete()}</p>
         </div>
         <div className="flex items-center gap-1">
           <button onClick={() => setShowDisplaySettings(true)} className="smi-btn" style={{ color: C.textMuted }}><Settings2 size={16} /></button>
